@@ -6,13 +6,13 @@ import scala.util.Random
 /** 生成: `runMain slm.Generate [checkpoint=checkpoints/ja1m] [prompt=...] [count=200] [temperature=0.8] [topK=40] [seed=0]` */
 object Generate:
 
-  def sample(model: Model, params: Array[Double], tokenizer: Tokenizer, prompt: String, count: Int,
+  def sample(model: Model, params: Array[Float], tokenizer: Tokenizer, prompt: String, count: Int,
              temperature: Double, topK: Int, rng: Random): String =
     var ids = tokenizer.encode(prompt).toVector
     val ws = model.workspace()
     for _ <- 1 to count do
       val window = ids.takeRight(model.cfg.context).toArray
-      val logits = model.lastLogits(params, window, ws)
+      val logits = model.lastLogits(params, window, ws).map(_.toDouble)
       ids = ids :+ pick(logits, temperature, topK, rng)
     tokenizer.decode(ids)
 

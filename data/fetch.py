@@ -6,7 +6,7 @@
 """
 import csv, io, re, sys, zipfile, concurrent.futures, urllib.request, pathlib, time, random
 
-TARGET = int(sys.argv[1]) if len(sys.argv) > 1 else 6_000_000
+TARGET = int([a for a in sys.argv[1:] if a.isdigit()][0]) if any(a.isdigit() for a in sys.argv[1:]) else 6_000_000
 ROOT = pathlib.Path(__file__).resolve().parent
 WORKS = ROOT / "works"
 WORKS.mkdir(exist_ok=True)
@@ -95,7 +95,13 @@ def main():
     chosen = []
     for a in AUTHORS:
         chosen.extend(by_author.get(a, []))
-    random.Random(0).shuffle(chosen)
+    if "--all" in sys.argv:  # 著者を限定せず、著作権切れ・新字新仮名の全作品（有名作家を先に）
+        seen = {r["作品ID"] for r in chosen}
+        rest = [r for r in rows if r["作品ID"] not in seen]
+        random.Random(0).shuffle(rest)
+        chosen = chosen + rest
+    else:
+        random.Random(0).shuffle(chosen)
     print(f"candidates: {len(chosen)} works from {len(AUTHORS)} authors")
     total = 0
     done = []

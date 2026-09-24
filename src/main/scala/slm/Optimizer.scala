@@ -1,36 +1,37 @@
 package slm
 
-/** AdamW。パラメータ配列を直接更新する（学習ループの中でだけ使う）。 */
+/** AdamW（Float32 のパラメータ、状態も Float32）。パラメータ配列を直接更新する。 */
 final class AdamW(size: Int, val beta1: Double = 0.9, val beta2: Double = 0.95, val eps: Double = 1e-8):
-  private val m = new Array[Double](size)
-  private val v = new Array[Double](size)
+  private val m = new Array[Float](size)
+  private val v = new Array[Float](size)
   var step: Int = 0
 
   /** `decayMask(i)` が真のパラメータにだけ重み減衰をかける。 */
-  def update(p: Array[Double], g: Array[Double], lr: Double, weightDecay: Double, decayMask: Int => Boolean): Unit =
+  def update(p: Array[Float], g: Array[Float], lr: Double, weightDecay: Double, decayMask: Array[Boolean]): Unit =
     step += 1
     val c1 = 1.0 / (1.0 - math.pow(beta1, step))
     val c2 = 1.0 / (1.0 - math.pow(beta2, step))
+    val b1 = beta1.toFloat; val b2 = beta2.toFloat
     var i = 0
     while i < size do
       val gi = g(i)
-      m(i) = beta1 * m(i) + (1 - beta1) * gi
-      v(i) = beta2 * v(i) + (1 - beta2) * gi * gi
+      m(i) = b1 * m(i) + (1 - b1) * gi
+      v(i) = b2 * v(i) + (1 - b2) * gi * gi
       val update = (m(i) * c1) / (math.sqrt(v(i) * c2) + eps)
       val decay = if decayMask(i) then weightDecay * p(i) else 0.0
-      p(i) -= lr * (update + decay)
+      p(i) = (p(i) - lr * (update + decay)).toFloat
       i += 1
 
 object Optimizer:
 
   /** 勾配の全体ノルムを clip 以下に抑える。返り値は元のノルム。 */
-  def clipGlobalNorm(g: Array[Double], clip: Double): Double =
+  def clipGlobalNorm(g: Array[Float], clip: Double): Double =
     var s = 0.0
     var i = 0
-    while i < g.length do { s += g(i) * g(i); i += 1 }
+    while i < g.length do { s += g(i).toDouble * g(i); i += 1 }
     val norm = math.sqrt(s)
     if norm > clip then
-      val f = clip / norm
+      val f = (clip / norm).toFloat
       i = 0
       while i < g.length do { g(i) *= f; i += 1 }
     norm

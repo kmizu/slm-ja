@@ -7,7 +7,7 @@ import scala.util.Random
 /** 学習: `runMain slm.Train [key=value ...]`
   *
   *   corpus=data/corpus.txt steps=20000 batch=32 lr=1e-3 warmup=300 wd=0.05 minCount=10
-  *   d=128 heads=4 layers=3 context=128 ff=512 threads=16 evalEvery=200 out=checkpoints/ja1m resume=
+  *   d=128 heads=4 layers=3 context=128 ff=512 threads=16 evalEvery=200 out=checkpoints/ja1m resume= prompt=　吾輩は
   */
 object Train:
 
@@ -27,6 +27,7 @@ object Train:
     val evalEvery = int("evalEvery", 200)
     val outDir = Path.of(str("out", "checkpoints/ja1m"))
     val seed = int("seed", 0)
+    val prompt = str("prompt", "　吾輩は")
 
     val text = Files.readString(corpusPath)
     val tokenizer = Tokenizer.fromText(text, int("minCount", 10))
@@ -52,16 +53,19 @@ object Train:
     val optimizer = new AdamW(params.length)
     val L = model.layout
     // 重み減衰は「重み行列」相当だけ（埋め込みは除く、バイアスと LN も除く）
-    val decayMask: Int => Boolean =
-      val ranges = L.layer.flatMap(l => Vector((l.wq, cfg.d * cfg.d), (l.wk, cfg.d * cfg.d), (l.wv, cfg.d * cfg.d), (l.wo, cfg.d * cfg.d), (l.w1, cfg.ff * cfg.d), (l.w2, cfg.d * cfg.ff)))
-      val mask = new Array[Boolean](params.length)
-      for (at, n) <- ranges do java.util.Arrays.fill(mask, at, at + n, true)
-      i => mask(i)
+    val decayMask = new Array[Boolean](params.length)
+    for l <- L.layer; (at, n) <- Vector((l.wq, cfg.d * cfg.d), (l.wk, cfg.d * cfg.d), (l.wv, cfg.d * cfg.d), (l.wo, cfg.d * cfg.d), (l.w1, cfg.ff * cfg.d), (l.w2, cfg.d * cfg.ff)) do
+      java.util.Arrays.fill(decayMask, at, at + n, true)
 
     val spaces = Array.fill(threads)(model.workspace())
     def evaluate(): Double =
-      val g = new Array[Double](params.length) // 捨てる
-      validWindows.map(w => model.lossAndGrad(params, g, w, spaces(0))).sum / validWindows.length
+      val losses = new Array[Double](validWindows.length)
+      IntStream.range(0, threads).parallel().forEach { th =>
+        val g = new Array[Float](params.length) // 捨てる
+        var b = th
+        while b < validWindows.length do { losses(b) = model.lossAndGrad(params, g, validWindows(b), spaces(th)); b += threads }
+      }
+      losses.sum / validWindows.length
 
     Files.createDirectories(outDir)
     val log = Files.newBufferedWriter(outDir.resolve("train.log"), java.nio.charset.StandardCharsets.UTF_8,
@@ -70,15 +74,14 @@ object Train:
 
     val start = System.nanoTime()
     var best = Double.MaxValue
-    val gradBuffers = Array.fill(threads)(new Array[Double](params.length))
-    val grad = new Array[Double](params.length)
+    val gradBuffers = Array.fill(threads)(new Array[Float](params.length))
+    val grad = new Array[Float](params.length)
     var step = optimizer.step
     var recent = 0.0
     var recentCount = 0
     while step < steps do
-      // バッチ: 乱数で窓を切り出す（乱数は逐次に引いて決定的にする）
       val windows = Array.fill(batch) { val s = rng.nextInt(train.length - cfg.context - 1); train.slice(s, s + cfg.context + 1) }
-      gradBuffers.foreach(b => java.util.Arrays.fill(b, 0.0))
+      gradBuffers.foreach(b => java.util.Arrays.fill(b, 0f))
       val losses = new Array[Double](batch)
       IntStream.range(0, threads).parallel().forEach { th =>
         var b = th
@@ -86,10 +89,11 @@ object Train:
           losses(b) = model.lossAndGrad(params, gradBuffers(th), windows(b), spaces(th))
           b += threads
       }
-      java.util.Arrays.fill(grad, 0.0)
+      java.util.Arrays.fill(grad, 0f)
+      val inv = (1.0 / batch).toFloat
       for buf <- gradBuffers do
         var i = 0
-        while i < grad.length do { grad(i) += buf(i) / batch; i += 1 }
+        while i < grad.length do { grad(i) += buf(i) * inv; i += 1 }
       val norm = Optimizer.clipGlobalNorm(grad, 1.0)
       val lr = Optimizer.schedule(step, steps, warmup, peakLr, peakLr * 0.1)
       optimizer.update(params, grad, lr, weightDecay, decayMask)
@@ -107,6 +111,6 @@ object Train:
           best = v
           Checkpoint.save(outDir, cfg, params, tokenizer)
         Checkpoint.save(outDir.resolve("last"), cfg, params, tokenizer)
-        val sample = Generate.sample(model, params, tokenizer, "　吾輩は", 80, 0.8, 40, new Random(step))
+        val sample = Generate.sample(model, params, tokenizer, prompt, 80, 0.8, 40, new Random(step))
         out("sample: " + sample.replace("\n", "⏎"))
     log.close()
