@@ -7,5 +7,7 @@ lazy val root = (project in file("."))
     scalacOptions ++= Seq("-deprecation", "-feature", "-Wunused:all"),
     libraryDependencies += "org.scalameta" %% "munit" % "1.1.1" % Test,
     Compile / run / fork := true,
-    Compile / run / javaOptions ++= Seq("-Xmx6g", "-XX:+UseParallelGC")
+    Compile / run / javaOptions ++= Seq("-Xmx6g", "-XX:+UseParallelGC", "--add-modules=jdk.incubator.vector"),
+    Test / fork := true,
+    Test / javaOptions += "--add-modules=jdk.incubator.vector"
   )

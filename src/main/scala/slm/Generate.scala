@@ -9,9 +9,10 @@ object Generate:
   def sample(model: Model, params: Array[Double], tokenizer: Tokenizer, prompt: String, count: Int,
              temperature: Double, topK: Int, rng: Random): String =
     var ids = tokenizer.encode(prompt).toVector
+    val ws = model.workspace()
     for _ <- 1 to count do
       val window = ids.takeRight(model.cfg.context).toArray
-      val logits = model.lastLogits(params, window)
+      val logits = model.lastLogits(params, window, ws)
       ids = ids :+ pick(logits, temperature, topK, rng)
     tokenizer.decode(ids)
 

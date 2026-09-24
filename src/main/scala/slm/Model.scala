@@ -50,9 +50,10 @@ final class Layout(val cfg: Config):
     ones(lnfg, cfg.d)
     p
 
-/** 1 系列ぶんの順伝播の途中結果。逆伝播で使う。 */
-final class Cache(cfg: Config, val T: Int):
-  val d = cfg.d
+/** 1 系列ぶんの順伝播の途中結果と、逆伝播の作業領域。スレッドごとに 1 つ持って使い回す。 */
+final class Workspace(cfg: Config):
+  val T: Int = cfg.context
+  private val d = cfg.d
   val x: Array[Array[Double]] = Array.ofDim(cfg.layers + 1, T * d)  // 各層の入力（x(0) は埋め込み）
   val a: Array[Array[Double]] = Array.ofDim(cfg.layers, T * d)      // LN1 の出力
   val mean1: Array[Array[Double]] = Array.ofDim(cfg.layers, T)
@@ -71,6 +72,20 @@ final class Cache(cfg: Config, val T: Int):
   val meanf: Array[Double] = new Array(T)
   val rstdf: Array[Double] = new Array(T)
   val logits: Array[Double] = new Array(T * cfg.vocab)
+  // 逆伝播の作業領域
+  val dx: Array[Double] = new Array(T * d)
+  val df: Array[Double] = new Array(T * d)
+  val dx1: Array[Double] = new Array(T * d)
+  val dO: Array[Double] = new Array(T * d)
+  val dq: Array[Double] = new Array(T * d)
+  val dk: Array[Double] = new Array(T * d)
+  val dv: Array[Double] = new Array(T * d)
+  val da: Array[Double] = new Array(T * d)
+  val dxNext: Array[Double] = new Array(T * d)
+  val tmp: Array[Double] = new Array(T * d)     // 注意の出力 Dense の結果（全トークン）
+  val rAll: Array[Double] = new Array(T * cfg.ff) // ReLU 後（全トークン）
+  val duAll: Array[Double] = new Array(T * cfg.ff)
+  val dp: Array[Double] = new Array(T)
 
 /** Transformer 言語モデル。順伝播と、手で書いた逆伝播。行列ライブラリは使わず、ニューロンごとのループで書く。 */
 final class Model(val cfg: Config):
@@ -79,35 +94,42 @@ final class Model(val cfg: Config):
   private val hd = cfg.headDim
   private val scale = 1.0 / math.sqrt(hd.toDouble)
 
+  def workspace(): Workspace = new Workspace(cfg)
+
   // ---- 基本部品 ----
 
-  /** y[o] = Σ_i W[o][i] x[i] + b[o]  （out 個のニューロン） */
-  private def dense(p: Array[Double], w: Int, b: Int, in: Int, out: Int, x: Array[Double], xAt: Int, y: Array[Double], yAt: Int): Unit =
+  /** 内積（SIMD 版）。 */
+  private def dot(a: Array[Double], aAt: Int, b: Array[Double], bAt: Int, n: Int): Double = Simd.dot(a, aAt, b, bAt, n)
+
+  /** 全トークンぶんの y[t][o] = Σ_i W[o][i] x[t][i] + b[o]。
+    * ニューロン（重みの行）を外側、トークンを内側に回す: 重み 1 行を L1 に置いたまま T 回使い、重みの読み出しを系列あたり 1 回にする。
+    */
+  private def denseAll(p: Array[Double], w: Int, b: Int, in: Int, out: Int, x: Array[Double], y: Array[Double], T: Int): Unit =
     var o = 0
     while o < out do
-      var s = p(b + o)
       val row = w + o * in
-      var i = 0
-      while i < in do
-        s += p(row + i) * x(xAt + i)
-        i += 1
-      y(yAt + o) = s
+      val bias = p(b + o)
+      var t = 0
+      while t < T do
+        y(t * out + o) = bias + dot(p, row, x, t * in, in)
+        t += 1
       o += 1
 
-  /** dense の逆: dx += Wᵀ dy, dW += dy xᵀ, db += dy */
-  private def denseBackward(p: Array[Double], g: Array[Double], w: Int, b: Int, in: Int, out: Int,
-                            x: Array[Double], xAt: Int, dy: Array[Double], dyAt: Int, dx: Array[Double], dxAt: Int): Unit =
+  /** denseAll の逆: dx[t] += Wᵀ dy[t], dW += Σ_t dy[t] x[t]ᵀ, db += Σ_t dy[t]。同じくニューロン外側。 */
+  private def denseBackwardAll(p: Array[Double], g: Array[Double], w: Int, b: Int, in: Int, out: Int,
+                               x: Array[Double], dy: Array[Double], dx: Array[Double], T: Int): Unit =
     var o = 0
     while o < out do
-      val gy = dy(dyAt + o)
-      if gy != 0.0 then
-        g(b + o) += gy
-        val row = w + o * in
-        var i = 0
-        while i < in do
-          g(row + i) += gy * x(xAt + i)
-          dx(dxAt + i) += gy * p(row + i)
-          i += 1
+      val row = w + o * in
+      var t = 0
+      while t < T do
+        val gy = dy(t * out + o)
+        if gy != 0.0 then
+          g(b + o) += gy
+          val xAt = t * in
+          Simd.axpy(g, row, gy, x, xAt, in)
+          Simd.axpy(dx, xAt, gy, p, row, in)
+        t += 1
       o += 1
 
   private def layerNorm(p: Array[Double], gAt: Int, bAt: Int, x: Array[Double], xAt: Int, y: Array[Double], yAt: Int,
@@ -129,7 +151,6 @@ final class Model(val cfg: Config):
 
   private def layerNormBackward(p: Array[Double], g: Array[Double], gAt: Int, bAt: Int, x: Array[Double], xAt: Int,
                                 mean: Double, rstd: Double, dy: Array[Double], dyAt: Int, dx: Array[Double], dxAt: Int): Unit =
-    // xhat = (x - mean) * rstd; dy_hat = dy * gain
     var sumDyHat = 0.0
     var sumDyHatXhat = 0.0
     var i = 0
@@ -141,22 +162,23 @@ final class Model(val cfg: Config):
       sumDyHat += dyh
       sumDyHatXhat += dyh * xhat
       i += 1
+    val meanDyHat = sumDyHat / d
+    val meanDyHatXhat = sumDyHatXhat / d
     i = 0
     while i < d do
       val xhat = (x(xAt + i) - mean) * rstd
       val dyh = dy(dyAt + i) * p(gAt + i)
-      dx(dxAt + i) += rstd * (dyh - sumDyHat / d - xhat * sumDyHatXhat / d)
+      dx(dxAt + i) += rstd * (dyh - meanDyHat - xhat * meanDyHatXhat)
       i += 1
 
   // ---- 順伝播 ----
 
-  /** ids を通して各位置のロジットを cache に入れる。 */
-  def forward(p: Array[Double], ids: Array[Int], cache: Cache): Unit =
+  /** ids を通して各位置のロジットを ws に入れる。 */
+  def forward(p: Array[Double], ids: Array[Int], ws: Workspace): Unit =
     val T = ids.length
-    require(T <= cfg.context && T == cache.T)
+    require(T <= cfg.context && T <= ws.T)
     val L = layout
-    // 埋め込み + 位置
-    val x0 = cache.x(0)
+    val x0 = ws.x(0)
     var t = 0
     while t < T do
       val tokAt = L.tok + ids(t) * d
@@ -166,57 +188,55 @@ final class Model(val cfg: Config):
         x0(t * d + i) = p(tokAt + i) + p(posAt + i)
         i += 1
       t += 1
+    val tmp = ws.tmp
+    val rAll = ws.rAll
     for l <- 0 until cfg.layers do
       val ly = L.layer(l)
-      val x = cache.x(l)
-      val a = cache.a(l)
+      val x = ws.x(l)
+      val a = ws.a(l)
       t = 0
       while t < T do
-        layerNorm(p, ly.ln1g, ly.ln1b, x, t * d, a, t * d, cache.mean1(l), cache.rstd1(l), t)
-        dense(p, ly.wq, ly.bq, d, d, a, t * d, cache.q(l), t * d)
-        dense(p, ly.wk, ly.bk, d, d, a, t * d, cache.k(l), t * d)
-        dense(p, ly.wv, ly.bv, d, d, a, t * d, cache.v(l), t * d)
+        layerNorm(p, ly.ln1g, ly.ln1b, x, t * d, a, t * d, ws.mean1(l), ws.rstd1(l), t)
         t += 1
-      attention(cache.q(l), cache.k(l), cache.v(l), cache.prob(l), cache.o(l), T)
-      val x1 = cache.x1(l)
-      val tmp = new Array[Double](d)
+      denseAll(p, ly.wq, ly.bq, d, d, a, ws.q(l), T)
+      denseAll(p, ly.wk, ly.bk, d, d, a, ws.k(l), T)
+      denseAll(p, ly.wv, ly.bv, d, d, a, ws.v(l), T)
+      attention(ws.q(l), ws.k(l), ws.v(l), ws.prob(l), ws.o(l), T)
+      val x1 = ws.x1(l)
+      val u = ws.u(l)
+      val next = ws.x(l + 1)
+      denseAll(p, ly.wo, ly.bo, d, d, ws.o(l), tmp, T)
+      var i = 0
+      while i < T * d do { x1(i) = x(i) + tmp(i); i += 1 }
       t = 0
       while t < T do
-        dense(p, ly.wo, ly.bo, d, d, cache.o(l), t * d, tmp, 0)
-        var i = 0
-        while i < d do
-          x1(t * d + i) = x(t * d + i) + tmp(i)
-          i += 1
-        layerNorm(p, ly.ln2g, ly.ln2b, x1, t * d, cache.b(l), t * d, cache.mean2(l), cache.rstd2(l), t)
-        dense(p, ly.w1, ly.b1, d, cfg.ff, cache.b(l), t * d, cache.u(l), t * cfg.ff)
-        val r = new Array[Double](cfg.ff)
-        var j = 0
-        while j < cfg.ff do { r(j) = math.max(0.0, cache.u(l)(t * cfg.ff + j)); j += 1 }
-        dense(p, ly.w2, ly.b2, cfg.ff, d, r, 0, tmp, 0)
-        val next = cache.x(l + 1)
-        i = 0
-        while i < d do
-          next(t * d + i) = x1(t * d + i) + tmp(i)
-          i += 1
+        layerNorm(p, ly.ln2g, ly.ln2b, x1, t * d, ws.b(l), t * d, ws.mean2(l), ws.rstd2(l), t)
         t += 1
-    // 最終 LN と出力（埋め込みと共有）
-    val xl = cache.x(cfg.layers)
+      denseAll(p, ly.w1, ly.b1, d, cfg.ff, ws.b(l), u, T)
+      var j = 0
+      while j < T * cfg.ff do { rAll(j) = math.max(0.0, u(j)); j += 1 }
+      denseAll(p, ly.w2, ly.b2, cfg.ff, d, rAll, tmp, T)
+      i = 0
+      while i < T * d do { next(i) = x1(i) + tmp(i); i += 1 }
+    // 最終 LN と出力（埋め込みと共有）。語彙を外側、トークンを内側に
+    val xl = ws.x(cfg.layers)
     t = 0
     while t < T do
-      layerNorm(p, L.lnfg, L.lnfb, xl, t * d, cache.f, t * d, cache.meanf, cache.rstdf, t)
-      var vIdx = 0
-      while vIdx < cfg.vocab do
-        var s = p(L.headb + vIdx)
-        val row = L.tok + vIdx * d
-        var i = 0
-        while i < d do { s += p(row + i) * cache.f(t * d + i); i += 1 }
-        cache.logits(t * cfg.vocab + vIdx) = s
-        vIdx += 1
+      layerNorm(p, L.lnfg, L.lnfb, xl, t * d, ws.f, t * d, ws.meanf, ws.rstdf, t)
       t += 1
+    var vIdx = 0
+    while vIdx < cfg.vocab do
+      val row = L.tok + vIdx * d
+      val bias = p(L.headb + vIdx)
+      t = 0
+      while t < T do
+        ws.logits(t * cfg.vocab + vIdx) = bias + dot(p, row, ws.f, t * d, d)
+        t += 1
+      vIdx += 1
 
   /** 因果的注意。各ヘッド、各位置 i について、j ≤ i との内積 → softmax → v の混合。 */
   private def attention(q: Array[Double], k: Array[Double], v: Array[Double], prob: Array[Double], o: Array[Double], T: Int): Unit =
-    java.util.Arrays.fill(o, 0.0)
+    java.util.Arrays.fill(o, 0, T * d, 0.0)
     var h = 0
     while h < cfg.heads do
       val off = h * hd
@@ -226,45 +246,41 @@ final class Model(val cfg: Config):
         var maxS = Double.NegativeInfinity
         var j = 0
         while j <= i do
-          var s = 0.0
-          var c = 0
-          while c < hd do { s += q(i * d + off + c) * k(j * d + off + c); c += 1 }
-          s *= scale
+          val s = dot(q, i * d + off, k, j * d + off, hd) * scale
           prob(pAt + j) = s
           if s > maxS then maxS = s
           j += 1
         var total = 0.0
         j = 0
         while j <= i do { val e = math.exp(prob(pAt + j) - maxS); prob(pAt + j) = e; total += e; j += 1 }
+        val inv = 1.0 / total
         j = 0
         while j <= i do
-          val w = prob(pAt + j) / total
+          val w = prob(pAt + j) * inv
           prob(pAt + j) = w
-          var c = 0
-          while c < hd do { o(i * d + off + c) += w * v(j * d + off + c); c += 1 }
+          Simd.axpy(o, i * d + off, w, v, j * d + off, hd)
           j += 1
         i += 1
       h += 1
 
-  /** 損失（各位置の交差エントロピーの平均）と、ロジットの勾配（cache.logits を上書き）。 */
-  def lossAndLogitGrad(cache: Cache, targets: Array[Int]): Double =
-    val T = cache.T
+  /** 損失（各位置の交差エントロピーの平均）と、ロジットの勾配（ws.logits を上書き）。 */
+  def lossAndLogitGrad(ws: Workspace, T: Int, targets: Array[Int]): Double =
     var loss = 0.0
     var t = 0
     while t < T do
       val at = t * cfg.vocab
       var maxL = Double.NegativeInfinity
       var vIdx = 0
-      while vIdx < cfg.vocab do { if cache.logits(at + vIdx) > maxL then maxL = cache.logits(at + vIdx); vIdx += 1 }
+      while vIdx < cfg.vocab do { if ws.logits(at + vIdx) > maxL then maxL = ws.logits(at + vIdx); vIdx += 1 }
       var total = 0.0
       vIdx = 0
-      while vIdx < cfg.vocab do { total += math.exp(cache.logits(at + vIdx) - maxL); vIdx += 1 }
+      while vIdx < cfg.vocab do { total += math.exp(ws.logits(at + vIdx) - maxL); vIdx += 1 }
       val logZ = math.log(total) + maxL
-      loss += logZ - cache.logits(at + targets(t))
+      loss += logZ - ws.logits(at + targets(t))
       vIdx = 0
       while vIdx < cfg.vocab do
-        val prob = math.exp(cache.logits(at + vIdx) - logZ)
-        cache.logits(at + vIdx) = (prob - (if vIdx == targets(t) then 1.0 else 0.0)) / T
+        val prob = math.exp(ws.logits(at + vIdx) - logZ)
+        ws.logits(at + vIdx) = (prob - (if vIdx == targets(t) then 1.0 else 0.0)) / T
         vIdx += 1
       t += 1
     loss / T
@@ -272,71 +288,66 @@ final class Model(val cfg: Config):
   // ---- 逆伝播 ----
 
   /** forward と lossAndLogitGrad のあとに呼ぶ。勾配を g に足し込む。 */
-  def backward(p: Array[Double], g: Array[Double], ids: Array[Int], cache: Cache): Unit =
-    val T = cache.T
+  def backward(p: Array[Double], g: Array[Double], ids: Array[Int], ws: Workspace): Unit =
+    val T = ids.length
     val L = layout
-    val dx = new Array[Double](T * d)      // いま逆伝播している層の入力に対する勾配
-    val df = new Array[Double](T * d)
-    // 出力ヘッド（埋め込みと共有）
+    val n = T * d
+    val dx = ws.dx
+    val df = ws.df
+    java.util.Arrays.fill(dx, 0, n, 0.0)
+    java.util.Arrays.fill(df, 0, n, 0.0)
+    // 出力ヘッド（埋め込みと共有）。語彙を外側、トークンを内側に
+    var vIdx = 0
+    while vIdx < cfg.vocab do
+      val row = L.tok + vIdx * d
+      var t = 0
+      while t < T do
+        val gl = ws.logits(t * cfg.vocab + vIdx)
+        g(L.headb + vIdx) += gl
+        Simd.axpy(g, row, gl, ws.f, t * d, d)
+        Simd.axpy(df, t * d, gl, p, row, d)
+        t += 1
+      vIdx += 1
     var t = 0
     while t < T do
-      var vIdx = 0
-      while vIdx < cfg.vocab do
-        val gl = cache.logits(t * cfg.vocab + vIdx)
-        if gl != 0.0 then
-          g(L.headb + vIdx) += gl
-          val row = L.tok + vIdx * d
-          var i = 0
-          while i < d do
-            g(row + i) += gl * cache.f(t * d + i)
-            df(t * d + i) += gl * p(row + i)
-            i += 1
-        vIdx += 1
-      layerNormBackward(p, g, L.lnfg, L.lnfb, cache.x(cfg.layers), t * d, cache.meanf(t), cache.rstdf(t), df, t * d, dx, t * d)
+      layerNormBackward(p, g, L.lnfg, L.lnfb, ws.x(cfg.layers), t * d, ws.meanf(t), ws.rstdf(t), df, t * d, dx, t * d)
       t += 1
     // ブロックを逆順に
+    val dx1 = ws.dx1; val dO = ws.dO; val dq = ws.dq; val dk = ws.dk; val dv = ws.dv; val da = ws.da; val dxNext = ws.dxNext
+    val duAll = ws.duAll; val rAll = ws.rAll; val tmp = ws.tmp
     var l = cfg.layers - 1
     while l >= 0 do
       val ly = L.layer(l)
-      val dx1 = new Array[Double](T * d)   // x1 に対する勾配（残差ぶんを先に入れる）
-      System.arraycopy(dx, 0, dx1, 0, T * d)
-      val db = new Array[Double](d)
-      val du = new Array[Double](cfg.ff)
-      val r = new Array[Double](cfg.ff)
+      System.arraycopy(dx, 0, dx1, 0, n)   // 残差ぶん
+      val u = ws.u(l)
+      // FF: y = W2 relu(W1 b + b1) + b2
+      var j = 0
+      while j < T * cfg.ff do { rAll(j) = math.max(0.0, u(j)); j += 1 }
+      java.util.Arrays.fill(duAll, 0, T * cfg.ff, 0.0)
+      denseBackwardAll(p, g, ly.w2, ly.b2, cfg.ff, d, rAll, dx, duAll, T)
+      j = 0
+      while j < T * cfg.ff do { if u(j) <= 0.0 then duAll(j) = 0.0; j += 1 }
+      java.util.Arrays.fill(tmp, 0, n, 0.0)
+      denseBackwardAll(p, g, ly.w1, ly.b1, d, cfg.ff, ws.b(l), duAll, tmp, T)
       t = 0
       while t < T do
-        // FF: y = W2 relu(W1 b + b1) + b2
-        var j = 0
-        while j < cfg.ff do { r(j) = math.max(0.0, cache.u(l)(t * cfg.ff + j)); j += 1 }
-        java.util.Arrays.fill(du, 0.0)
-        denseBackward(p, g, ly.w2, ly.b2, cfg.ff, d, r, 0, dx, t * d, du, 0)
-        j = 0
-        while j < cfg.ff do { if cache.u(l)(t * cfg.ff + j) <= 0.0 then du(j) = 0.0; j += 1 }
-        java.util.Arrays.fill(db, 0.0)
-        denseBackward(p, g, ly.w1, ly.b1, d, cfg.ff, cache.b(l), t * d, du, 0, db, 0)
-        layerNormBackward(p, g, ly.ln2g, ly.ln2b, cache.x1(l), t * d, cache.mean2(l)(t), cache.rstd2(l)(t), db, 0, dx1, t * d)
+        layerNormBackward(p, g, ly.ln2g, ly.ln2b, ws.x1(l), t * d, ws.mean2(l)(t), ws.rstd2(l)(t), tmp, t * d, dx1, t * d)
         t += 1
       // 注意: x1 = x + Wo o + bo
-      val dO = new Array[Double](T * d)
+      java.util.Arrays.fill(dO, 0, n, 0.0)
+      denseBackwardAll(p, g, ly.wo, ly.bo, d, d, ws.o(l), dx1, dO, T)
+      java.util.Arrays.fill(dq, 0, n, 0.0); java.util.Arrays.fill(dk, 0, n, 0.0); java.util.Arrays.fill(dv, 0, n, 0.0)
+      attentionBackward(ws.q(l), ws.k(l), ws.v(l), ws.prob(l), dO, dq, dk, dv, ws.dp, T)
+      java.util.Arrays.fill(da, 0, n, 0.0)
+      System.arraycopy(dx1, 0, dxNext, 0, n) // 残差
+      denseBackwardAll(p, g, ly.wq, ly.bq, d, d, ws.a(l), dq, da, T)
+      denseBackwardAll(p, g, ly.wk, ly.bk, d, d, ws.a(l), dk, da, T)
+      denseBackwardAll(p, g, ly.wv, ly.bv, d, d, ws.a(l), dv, da, T)
       t = 0
       while t < T do
-        denseBackward(p, g, ly.wo, ly.bo, d, d, cache.o(l), t * d, dx1, t * d, dO, t * d)
+        layerNormBackward(p, g, ly.ln1g, ly.ln1b, ws.x(l), t * d, ws.mean1(l)(t), ws.rstd1(l)(t), da, t * d, dxNext, t * d)
         t += 1
-      val dq = new Array[Double](T * d)
-      val dk = new Array[Double](T * d)
-      val dv = new Array[Double](T * d)
-      attentionBackward(cache.q(l), cache.k(l), cache.v(l), cache.prob(l), dO, dq, dk, dv, T)
-      val da = new Array[Double](T * d)
-      val dxNext = new Array[Double](T * d)
-      System.arraycopy(dx1, 0, dxNext, 0, T * d) // 残差
-      t = 0
-      while t < T do
-        denseBackward(p, g, ly.wq, ly.bq, d, d, cache.a(l), t * d, dq, t * d, da, t * d)
-        denseBackward(p, g, ly.wk, ly.bk, d, d, cache.a(l), t * d, dk, t * d, da, t * d)
-        denseBackward(p, g, ly.wv, ly.bv, d, d, cache.a(l), t * d, dv, t * d, da, t * d)
-        layerNormBackward(p, g, ly.ln1g, ly.ln1b, cache.x(l), t * d, cache.mean1(l)(t), cache.rstd1(l)(t), da, t * d, dxNext, t * d)
-        t += 1
-      System.arraycopy(dxNext, 0, dx, 0, T * d)
+      System.arraycopy(dxNext, 0, dx, 0, n)
       l -= 1
     // 埋め込み
     t = 0
@@ -351,57 +362,46 @@ final class Model(val cfg: Config):
       t += 1
 
   private def attentionBackward(q: Array[Double], k: Array[Double], v: Array[Double], prob: Array[Double],
-                                dO: Array[Double], dq: Array[Double], dk: Array[Double], dv: Array[Double], T: Int): Unit =
-    val dp = new Array[Double](T)
+                                dO: Array[Double], dq: Array[Double], dk: Array[Double], dv: Array[Double], dp: Array[Double], T: Int): Unit =
     var h = 0
     while h < cfg.heads do
       val off = h * hd
       var i = 0
       while i < T do
         val pAt = (h * T + i) * T
-        // dv_j += w_ij dO_i ;  dw_ij = dO_i · v_j
         var j = 0
         while j <= i do
           val w = prob(pAt + j)
-          var s = 0.0
-          var c = 0
-          while c < hd do
-            val go = dO(i * d + off + c)
-            dv(j * d + off + c) += w * go
-            s += go * v(j * d + off + c)
-            c += 1
-          dp(j) = s
+          Simd.axpy(dv, j * d + off, w, dO, i * d + off, hd)
+          dp(j) = dot(dO, i * d + off, v, j * d + off, hd)
           j += 1
-        // softmax の逆: ds_ij = w_ij (dw_ij - Σ_j w_ij dw_ij)
-        var dot = 0.0
+        var dotSum = 0.0
         j = 0
-        while j <= i do { dot += prob(pAt + j) * dp(j); j += 1 }
+        while j <= i do { dotSum += prob(pAt + j) * dp(j); j += 1 }
         j = 0
         while j <= i do
-          val ds = prob(pAt + j) * (dp(j) - dot) * scale
-          var c = 0
-          while c < hd do
-            dq(i * d + off + c) += ds * k(j * d + off + c)
-            dk(j * d + off + c) += ds * q(i * d + off + c)
-            c += 1
+          val ds = prob(pAt + j) * (dp(j) - dotSum) * scale
+          Simd.axpy(dq, i * d + off, ds, k, j * d + off, hd)
+          Simd.axpy(dk, j * d + off, ds, q, i * d + off, hd)
           j += 1
         i += 1
       h += 1
 
-  /** 1 系列の損失と勾配（g に足し込む）。 */
-  def lossAndGrad(p: Array[Double], g: Array[Double], window: Array[Int]): Double =
+  /** 1 系列の損失と勾配（g に足し込む）。作業領域を渡す版。 */
+  def lossAndGrad(p: Array[Double], g: Array[Double], window: Array[Int], ws: Workspace): Double =
     val ids = window.dropRight(1)
     val targets = window.drop(1)
-    val cache = new Cache(cfg, ids.length)
-    forward(p, ids, cache)
-    val loss = lossAndLogitGrad(cache, targets)
-    backward(p, g, ids, cache)
+    forward(p, ids, ws)
+    val loss = lossAndLogitGrad(ws, ids.length, targets)
+    backward(p, g, ids, ws)
     loss
 
+  def lossAndGrad(p: Array[Double], g: Array[Double], window: Array[Int]): Double =
+    lossAndGrad(p, g, window, workspace())
+
   /** 最後の位置のロジット（生成用）。 */
-  def lastLogits(p: Array[Double], ids: Array[Int]): Array[Double] =
-    val cache = new Cache(cfg, ids.length)
-    forward(p, ids, cache)
-    cache.logits.slice((ids.length - 1) * cfg.vocab, ids.length * cfg.vocab)
+  def lastLogits(p: Array[Double], ids: Array[Int], ws: Workspace): Array[Double] =
+    forward(p, ids, ws)
+    ws.logits.slice((ids.length - 1) * cfg.vocab, ids.length * cfg.vocab)
 
   def parameterCount: Int = layout.size

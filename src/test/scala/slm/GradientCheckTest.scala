@@ -50,8 +50,8 @@ class GradientCheckTest extends munit.FunSuite:
     val p = model.layout.init(new Random(2))
     val a = Array(1, 2, 3, 4)
     val b = Array(1, 2, 3, 6)
-    val ca = new Cache(cfg, 4); model.forward(p, a, ca)
-    val cb = new Cache(cfg, 4); model.forward(p, b, cb)
+    val ca = model.workspace(); model.forward(p, a, ca)
+    val cb = model.workspace(); model.forward(p, b, cb)
     for i <- 0 until 3 * cfg.vocab do assertEqualsDouble(ca.logits(i), cb.logits(i), 1e-12)
   }
 

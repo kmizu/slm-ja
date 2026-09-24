@@ -58,9 +58,10 @@ object Train:
       for (at, n) <- ranges do java.util.Arrays.fill(mask, at, at + n, true)
       i => mask(i)
 
+    val spaces = Array.fill(threads)(model.workspace())
     def evaluate(): Double =
       val g = new Array[Double](params.length) // 捨てる
-      validWindows.map(w => model.lossAndGrad(params, g, w)).sum / validWindows.length
+      validWindows.map(w => model.lossAndGrad(params, g, w, spaces(0))).sum / validWindows.length
 
     Files.createDirectories(outDir)
     val log = Files.newBufferedWriter(outDir.resolve("train.log"), java.nio.charset.StandardCharsets.UTF_8,
@@ -82,7 +83,7 @@ object Train:
       IntStream.range(0, threads).parallel().forEach { th =>
         var b = th
         while b < batch do
-          losses(b) = model.lossAndGrad(params, gradBuffers(th), windows(b))
+          losses(b) = model.lossAndGrad(params, gradBuffers(th), windows(b), spaces(th))
           b += threads
       }
       java.util.Arrays.fill(grad, 0.0)
