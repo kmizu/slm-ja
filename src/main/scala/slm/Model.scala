@@ -86,7 +86,7 @@ final class Workspace(cfg: Config):
   val rAll: Array[Float] = new Array(T * cfg.ff)
   val duAll: Array[Float] = new Array(T * cfg.ff)
   val dp: Array[Float] = new Array(T)
-  val out4: Array[Float] = new Array(4)
+  val out4: Array[Float] = new Array(8)
 
 /** Transformer 言語モデル（Float32）。順伝播と、手で書いた逆伝播。行列ライブラリは使わず、ニューロンごとのループで書く。 */
 final class Model(val cfg: Config):
@@ -104,21 +104,36 @@ final class Model(val cfg: Config):
     */
   private def denseAll(p: Array[Float], w: Int, b: Int, in: Int, out: Int, x: Array[Float], y: Array[Float], T: Int, out4: Array[Float]): Unit =
     var o = 0
+    while o + 1 < out do
+      val row0 = w + o * in
+      val row1 = row0 + in
+      val bias0 = p(b + o)
+      val bias1 = p(b + o + 1)
+      var t = 0
+      while t + 3 < T do
+        Simd.dot4x2(p, row0, row1, x, t * in, (t + 1) * in, (t + 2) * in, (t + 3) * in, in, out4)
+        y(t * out + o) = bias0 + out4(0); y((t + 1) * out + o) = bias0 + out4(1)
+        y((t + 2) * out + o) = bias0 + out4(2); y((t + 3) * out + o) = bias0 + out4(3)
+        y(t * out + o + 1) = bias1 + out4(4); y((t + 1) * out + o + 1) = bias1 + out4(5)
+        y((t + 2) * out + o + 1) = bias1 + out4(6); y((t + 3) * out + o + 1) = bias1 + out4(7)
+        t += 4
+      while t < T do
+        y(t * out + o) = bias0 + Simd.dot(p, row0, x, t * in, in)
+        y(t * out + o + 1) = bias1 + Simd.dot(p, row1, x, t * in, in)
+        t += 1
+      o += 2
     while o < out do
       val row = w + o * in
       val bias = p(b + o)
       var t = 0
-      while t + 3 < T do
-        Simd.dot4(p, row, x, t * in, (t + 1) * in, (t + 2) * in, (t + 3) * in, in, out4)
-        y(t * out + o) = bias + out4(0); y((t + 1) * out + o) = bias + out4(1)
-        y((t + 2) * out + o) = bias + out4(2); y((t + 3) * out + o) = bias + out4(3)
-        t += 4
       while t < T do
         y(t * out + o) = bias + Simd.dot(p, row, x, t * in, in)
         t += 1
       o += 1
 
-  /** denseAll の逆: dx[t] += Wᵀ dy[t], dW += Σ_t dy[t] x[t]ᵀ, db += Σ_t dy[t]。 */
+  /** denseAll の逆: dx[t] += Wᵀ dy[t], dW += Σ_t dy[t] x[t]ᵀ, db += Σ_t dy[t]。
+    * dW はニューロン外側・トークン 4 本まとめ（重みの行 1 本を書き戻す）、dx はニューロン 4 本まとめ・トークン内側（dx の行 1 本を書き戻す）。
+    */
   private def denseBackwardAll(p: Array[Float], g: Array[Float], w: Int, b: Int, in: Int, out: Int,
                                x: Array[Float], dy: Array[Float], dx: Array[Float], T: Int): Unit =
     var o = 0
@@ -130,14 +145,31 @@ final class Model(val cfg: Config):
         if g0 != 0f || g1 != 0f || g2 != 0f || g3 != 0f then
           g(b + o) += g0 + g1 + g2 + g3
           Simd.axpy4(g, row, g0, g1, g2, g3, x, t * in, (t + 1) * in, (t + 2) * in, (t + 3) * in, in)
-          Simd.spread4(dx, t * in, (t + 1) * in, (t + 2) * in, (t + 3) * in, g0, g1, g2, g3, p, row, in)
         t += 4
       while t < T do
         val gy = dy(t * out + o)
         if gy != 0f then
           g(b + o) += gy
           Simd.axpy(g, row, gy, x, t * in, in)
-          Simd.axpy(dx, t * in, gy, p, row, in)
+        t += 1
+      o += 1
+    o = 0
+    while o + 3 < out do
+      val row0 = w + o * in
+      var t = 0
+      while t < T do
+        val at = t * out + o
+        val g0 = dy(at); val g1 = dy(at + 1); val g2 = dy(at + 2); val g3 = dy(at + 3)
+        if g0 != 0f || g1 != 0f || g2 != 0f || g3 != 0f then
+          Simd.axpy4(dx, t * in, g0, g1, g2, g3, p, row0, row0 + in, row0 + 2 * in, row0 + 3 * in, in)
+        t += 1
+      o += 4
+    while o < out do
+      val row = w + o * in
+      var t = 0
+      while t < T do
+        val gy = dy(t * out + o)
+        if gy != 0f then Simd.axpy(dx, t * in, gy, p, row, in)
         t += 1
       o += 1
 

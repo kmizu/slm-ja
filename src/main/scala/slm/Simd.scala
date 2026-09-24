@@ -54,6 +54,31 @@ object Simd:
       i += 1
     out(0) = s0; out(1) = s1; out(2) = s2; out(3) = s3
 
+
+  /** w の 2 行（w0At, w1At）と x の 4 行との内積 8 個を同時に。out(0..3) が w0 と x0..x3、out(4..7) が w1 と x0..x3。 */
+  def dot4x2(w: Array[Float], w0At: Int, w1At: Int, x: Array[Float], x0At: Int, x1At: Int, x2At: Int, x3At: Int, n: Int, out: Array[Float]): Unit =
+    var a00 = FloatVector.zero(S); var a01 = FloatVector.zero(S); var a02 = FloatVector.zero(S); var a03 = FloatVector.zero(S)
+    var a10 = FloatVector.zero(S); var a11 = FloatVector.zero(S); var a12 = FloatVector.zero(S); var a13 = FloatVector.zero(S)
+    var i = 0
+    val bound = n - (n % lanes)
+    while i < bound do
+      val w0 = FloatVector.fromArray(S, w, w0At + i)
+      val w1 = FloatVector.fromArray(S, w, w1At + i)
+      val x0 = FloatVector.fromArray(S, x, x0At + i); a00 = x0.fma(w0, a00); a10 = x0.fma(w1, a10)
+      val x1 = FloatVector.fromArray(S, x, x1At + i); a01 = x1.fma(w0, a01); a11 = x1.fma(w1, a11)
+      val x2 = FloatVector.fromArray(S, x, x2At + i); a02 = x2.fma(w0, a02); a12 = x2.fma(w1, a12)
+      val x3 = FloatVector.fromArray(S, x, x3At + i); a03 = x3.fma(w0, a03); a13 = x3.fma(w1, a13)
+      i += lanes
+    out(0) = a00.reduceLanes(VectorOperators.ADD); out(1) = a01.reduceLanes(VectorOperators.ADD)
+    out(2) = a02.reduceLanes(VectorOperators.ADD); out(3) = a03.reduceLanes(VectorOperators.ADD)
+    out(4) = a10.reduceLanes(VectorOperators.ADD); out(5) = a11.reduceLanes(VectorOperators.ADD)
+    out(6) = a12.reduceLanes(VectorOperators.ADD); out(7) = a13.reduceLanes(VectorOperators.ADD)
+    while i < n do
+      val w0 = w(w0At + i); val w1 = w(w1At + i)
+      out(0) += w0 * x(x0At + i); out(1) += w0 * x(x1At + i); out(2) += w0 * x(x2At + i); out(3) += w0 * x(x3At + i)
+      out(4) += w1 * x(x0At + i); out(5) += w1 * x(x1At + i); out(6) += w1 * x(x2At + i); out(7) += w1 * x(x3At + i)
+      i += 1
+
   /** y[yAt+i] += alpha * x[xAt+i] */
   def axpy(y: Array[Float], yAt: Int, alpha: Float, x: Array[Float], xAt: Int, n: Int): Unit =
     val av = FloatVector.broadcast(S, alpha)
