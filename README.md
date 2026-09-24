@@ -1,0 +1,47 @@
+# slm-ja-1m
+
+日本語だけで学習する、約 1M パラメータの小さな言語モデル（SLM）。Scala 3 で、行列ライブラリを使わず、
+ニューロンごとのループで順伝播と逆伝播を手で書いています。依存は Scala 標準ライブラリだけ。
+
+「[行列を使わない Transformer 入門](https://kmizu.github.io/no-matrix-transformer/)」の続きとして、
+あちらの 7,000 パラメータのおもちゃを、実際に文章を学べる大きさまで育てたものです。
+
+## モデル
+
+| 項目 | 値 |
+|---|---|
+| トークン | 文字単位（出現 10 回以上の 3,612 字 + UNK） |
+| d_model / heads / layers / FF / context | 128 / 4 / 3 / 512 / 128 |
+| 出力ヘッド | 入力埋め込みと共有 |
+| パラメータ数 | 1,077,533 |
+| 学習 | AdamW（β=0.9, 0.95、重み減衰 0.05）、予熱つき cosine、勾配クリップ 1.0 |
+
+## データ
+
+青空文庫の著作権切れ・新字新仮名の作品を 313 本（約 641 万文字）。`data/fetch.py` が索引を読んで
+GitHub ミラーから取得し、ルビ・注記・ヘッダ・底本情報を落として `data/corpus.txt` にまとめます。
+末尾 3% を検証用に分けます。
+
+```bash
+python3 data/fetch.py 6000000
+```
+
+## 使い方
+
+```bash
+sbt test                                             # 勾配検査（数値微分と 1e-5 で一致）ほか
+sbt "runMain slm.Train steps=3000 batch=32"          # 学習（checkpoints/ja1m に保存）
+sbt "runMain slm.Generate prompt=　吾輩は count=200"   # 生成
+```
+
+長く回すときは sbt を介さず `java -cp` で起動する方が楽です（`sbt "export Runtime/fullClasspath"`）。
+
+## 実装
+
+- `Model.scala` — パラメータは 1 本の配列。`Layout` が各部品の区間を持つ。`forward` / `backward` は
+  ニューロンごとの while ループ。注意は「各位置 i について j ≤ i と内積 → softmax → v を混ぜる」をそのまま書く。
+- `Optimizer.scala` — AdamW、勾配クリップ、学習率スケジュール。
+- `Train.scala` — 系列ごとに並列（スレッドごとに勾配バッファを持ち、最後に足す）。
+- `GradientCheckTest.scala` — 小さい設定で全種類のパラメータについて数値微分と突き合わせる。
+
+速度は 16 論理コアで約 1,400 トークン/秒（Double、SIMD なし）。2 エポックで 2 時間半ほど。
