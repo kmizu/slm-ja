@@ -3,9 +3,11 @@ package slm.reference
 import scala.util.Random
 
 /** モデルの大きさ。 */
-final case class Config(vocab: Int, d: Int, heads: Int, layers: Int, context: Int, ff: Int):
+final case class Config(vocab: Int, d: Int, heads: Int, layers: Int, context: Int, ff: Int, attention: String = "softmax"):
   require(d % heads == 0, "d はヘッド数で割り切れること")
   val headDim: Int = d / heads
+  def isLinear: Boolean = attention == "linear"
+  def gamma(h: Int): Double = 1.0 - math.pow(2.0, -(5.0 + h))
 
 /** パラメータは 1 本の配列。各部品はその中の区間（オフセットと長さ）。
   *
@@ -61,7 +63,10 @@ final class Workspace(cfg: Config):
   val q: Array[Array[Double]] = Array.ofDim(cfg.layers, T * d)
   val k: Array[Array[Double]] = Array.ofDim(cfg.layers, T * d)
   val v: Array[Array[Double]] = Array.ofDim(cfg.layers, T * d)
-  val prob: Array[Array[Double]] = Array.ofDim(cfg.layers, cfg.heads * T * T) // 注意の割合
+  val prob: Array[Array[Double]] = Array.ofDim(cfg.layers, if cfg.isLinear then 1 else cfg.heads * T * T)
+  val fq: Array[Array[Double]] = Array.ofDim(cfg.layers, T * d)
+  val fk: Array[Array[Double]] = Array.ofDim(cfg.layers, T * d)
+  val den: Array[Array[Double]] = Array.ofDim(cfg.layers, cfg.heads * T)
   val o: Array[Array[Double]] = Array.ofDim(cfg.layers, T * d)      // ヘッド連結後
   val x1: Array[Array[Double]] = Array.ofDim(cfg.layers, T * d)     // 注意の残差後
   val b: Array[Array[Double]] = Array.ofDim(cfg.layers, T * d)      // LN2 の出力
@@ -201,7 +206,8 @@ final class Model(val cfg: Config):
       denseAll(p, ly.wq, ly.bq, d, d, a, ws.q(l), T)
       denseAll(p, ly.wk, ly.bk, d, d, a, ws.k(l), T)
       denseAll(p, ly.wv, ly.bv, d, d, a, ws.v(l), T)
-      attention(ws.q(l), ws.k(l), ws.v(l), ws.prob(l), ws.o(l), T)
+      if cfg.isLinear then linearAttention(ws.q(l), ws.k(l), ws.v(l), ws.fq(l), ws.fk(l), ws.den(l), ws.o(l), T)
+      else attention(ws.q(l), ws.k(l), ws.v(l), ws.prob(l), ws.o(l), T)
       val x1 = ws.x1(l)
       val u = ws.u(l)
       val next = ws.x(l + 1)
@@ -262,6 +268,67 @@ final class Model(val cfg: Config):
           j += 1
         i += 1
       h += 1
+
+
+  // ---- 線形注意（Double 参照実装、Float 版と同じ式を素直なループで） ----
+  private val eps = 1e-6
+  private def phi(x: Double): Double = if x > 0 then x + 1 else math.exp(x)
+  private def phiPrime(x: Double): Double = if x > 0 then 1.0 else math.exp(x)
+
+  private def linearAttention(q: Array[Double], k: Array[Double], v: Array[Double], fq: Array[Double], fk: Array[Double],
+                              den: Array[Double], o: Array[Double], T: Int): Unit =
+    val s = new Array[Double](hd * hd); val z = new Array[Double](hd)
+    for h <- 0 until cfg.heads do
+      val g = cfg.gamma(h); val off = h * hd
+      java.util.Arrays.fill(s, 0.0); java.util.Arrays.fill(z, 0.0)
+      for i <- 0 until T do
+        val at = i * d + off
+        for c <- 0 until hd do { fq(at + c) = phi(q(at + c)); fk(at + c) = phi(k(at + c)) }
+        for r <- 0 until hd do
+          z(r) = g * z(r) + fk(at + r)
+          for c <- 0 until hd do s(r * hd + c) = g * s(r * hd + c) + fk(at + r) * v(at + c)
+        var dn = eps
+        for r <- 0 until hd do dn += fq(at + r) * z(r)
+        den(h * T + i) = dn
+        for c <- 0 until hd do
+          var a = 0.0
+          for r <- 0 until hd do a += fq(at + r) * s(r * hd + c)
+          o(at + c) = a / dn
+
+  private def linearAttentionBackward(q: Array[Double], k: Array[Double], v: Array[Double], fq: Array[Double], fk: Array[Double],
+                                      den: Array[Double], o: Array[Double], dO: Array[Double],
+                                      dq: Array[Double], dk: Array[Double], dv: Array[Double], T: Int): Unit =
+    val s = new Array[Double](hd * hd); val z = new Array[Double](hd)
+    val da = new Array[Double](T * d); val dden = new Array[Double](cfg.heads * T)
+    for h <- 0 until cfg.heads do
+      val g = cfg.gamma(h); val off = h * hd
+      java.util.Arrays.fill(s, 0.0); java.util.Arrays.fill(z, 0.0)
+      for i <- 0 until T do
+        val at = i * d + off
+        for r <- 0 until hd do
+          z(r) = g * z(r) + fk(at + r)
+          for c <- 0 until hd do s(r * hd + c) = g * s(r * hd + c) + fk(at + r) * v(at + c)
+        val dn = den(h * T + i)
+        var dotDoO = 0.0
+        for c <- 0 until hd do { da(at + c) = dO(at + c) / dn; dotDoO += dO(at + c) * o(at + c) }
+        val dd = -dotDoO / dn
+        dden(h * T + i) = dd
+        for r <- 0 until hd do
+          var dfq = dd * z(r)
+          for c <- 0 until hd do dfq += da(at + c) * s(r * hd + c)
+          dq(at + r) += dfq * phiPrime(q(at + r))
+      java.util.Arrays.fill(s, 0.0); java.util.Arrays.fill(z, 0.0)
+      for i <- (T - 1) to 0 by -1 do
+        val at = i * d + off
+        val dd = dden(h * T + i)
+        for r <- 0 until hd do
+          z(r) = g * z(r) + dd * fq(at + r)
+          for c <- 0 until hd do s(r * hd + c) = g * s(r * hd + c) + fq(at + r) * da(at + c)
+        for r <- 0 until hd do
+          var dfk = z(r)
+          for c <- 0 until hd do dfk += s(r * hd + c) * v(at + c)
+          dk(at + r) += dfk * phiPrime(k(at + r))
+          for c <- 0 until hd do dv(at + c) += s(r * hd + c) * fk(at + r)
 
   /** 損失（各位置の交差エントロピーの平均）と、ロジットの勾配（ws.logits を上書き）。 */
   def lossAndLogitGrad(ws: Workspace, T: Int, targets: Array[Int]): Double =
@@ -337,7 +404,8 @@ final class Model(val cfg: Config):
       java.util.Arrays.fill(dO, 0, n, 0.0)
       denseBackwardAll(p, g, ly.wo, ly.bo, d, d, ws.o(l), dx1, dO, T)
       java.util.Arrays.fill(dq, 0, n, 0.0); java.util.Arrays.fill(dk, 0, n, 0.0); java.util.Arrays.fill(dv, 0, n, 0.0)
-      attentionBackward(ws.q(l), ws.k(l), ws.v(l), ws.prob(l), dO, dq, dk, dv, ws.dp, T)
+      if cfg.isLinear then linearAttentionBackward(ws.q(l), ws.k(l), ws.v(l), ws.fq(l), ws.fk(l), ws.den(l), ws.o(l), dO, dq, dk, dv, T)
+      else attentionBackward(ws.q(l), ws.k(l), ws.v(l), ws.prob(l), dO, dq, dk, dv, ws.dp, T)
       java.util.Arrays.fill(da, 0, n, 0.0)
       System.arraycopy(dx1, 0, dxNext, 0, n) // 残差
       denseBackwardAll(p, g, ly.wq, ly.bq, d, d, ws.a(l), dq, da, T)

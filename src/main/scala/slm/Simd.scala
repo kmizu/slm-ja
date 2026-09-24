@@ -1,6 +1,6 @@
 package slm
 
-import jdk.incubator.vector.{FloatVector, VectorOperators, VectorSpecies}
+import jdk.incubator.vector.{FloatVector, VectorShuffle, VectorSpecies}
 
 /** SIMD（1 命令で複数の数を同時に扱う）版の内積と axpy。Float32、JDK の Vector API。
   *
@@ -12,6 +12,19 @@ import jdk.incubator.vector.{FloatVector, VectorOperators, VectorSpecies}
 object Simd:
   private val S: VectorSpecies[java.lang.Float] = FloatVector.SPECIES_PREFERRED
   val lanes: Int = S.length()
+
+  /** 順序を固定した木構造の加算。`reduceLanes(ADD)` は加算順が未規定で JIT の段階により丸めが変わり得るため、
+    * 半分ずつ入れ替えて足す（16 → 8 → 4 → 2 → 1）。要素ごとの演算と並べ替えだけなので、どの実行経路でも同じ結果になる。
+    */
+  private val swaps: Array[VectorShuffle[java.lang.Float]] =
+    Iterator.iterate(lanes / 2)(_ / 2).takeWhile(_ >= 1).map(h => VectorShuffle.fromOp(S, (i: Int) => i ^ h)).toArray
+  private def orderedSum(v: FloatVector): Float =
+    var x = v
+    var k = 0
+    while k < swaps.length do
+      x = x.add(x.rearrange(swaps(k)))
+      k += 1
+    x.lane(0)
 
   /** Σ_i a[aAt+i] * b[bAt+i] */
   def dot(a: Array[Float], aAt: Int, b: Array[Float], bAt: Int, n: Int): Float =
@@ -28,7 +41,7 @@ object Simd:
     while i < bound do
       acc0 = FloatVector.fromArray(S, a, aAt + i).fma(FloatVector.fromArray(S, b, bAt + i), acc0)
       i += lanes
-    var s = acc0.add(acc1).reduceLanes(VectorOperators.ADD)
+    var s = orderedSum(acc0.add(acc1))
     while i < n do
       s += a(aAt + i) * b(bAt + i)
       i += 1
@@ -46,8 +59,8 @@ object Simd:
       a2 = FloatVector.fromArray(S, x, x2At + i).fma(wv, a2)
       a3 = FloatVector.fromArray(S, x, x3At + i).fma(wv, a3)
       i += lanes
-    var s0 = a0.reduceLanes(VectorOperators.ADD); var s1 = a1.reduceLanes(VectorOperators.ADD)
-    var s2 = a2.reduceLanes(VectorOperators.ADD); var s3 = a3.reduceLanes(VectorOperators.ADD)
+    var s0 = orderedSum(a0); var s1 = orderedSum(a1)
+    var s2 = orderedSum(a2); var s3 = orderedSum(a3)
     while i < n do
       val wi = w(wAt + i)
       s0 += wi * x(x0At + i); s1 += wi * x(x1At + i); s2 += wi * x(x2At + i); s3 += wi * x(x3At + i)
@@ -69,10 +82,8 @@ object Simd:
       val x2 = FloatVector.fromArray(S, x, x2At + i); a02 = x2.fma(w0, a02); a12 = x2.fma(w1, a12)
       val x3 = FloatVector.fromArray(S, x, x3At + i); a03 = x3.fma(w0, a03); a13 = x3.fma(w1, a13)
       i += lanes
-    out(0) = a00.reduceLanes(VectorOperators.ADD); out(1) = a01.reduceLanes(VectorOperators.ADD)
-    out(2) = a02.reduceLanes(VectorOperators.ADD); out(3) = a03.reduceLanes(VectorOperators.ADD)
-    out(4) = a10.reduceLanes(VectorOperators.ADD); out(5) = a11.reduceLanes(VectorOperators.ADD)
-    out(6) = a12.reduceLanes(VectorOperators.ADD); out(7) = a13.reduceLanes(VectorOperators.ADD)
+    out(0) = orderedSum(a00); out(1) = orderedSum(a01); out(2) = orderedSum(a02); out(3) = orderedSum(a03)
+    out(4) = orderedSum(a10); out(5) = orderedSum(a11); out(6) = orderedSum(a12); out(7) = orderedSum(a13)
     while i < n do
       val w0 = w(w0At + i); val w1 = w(w1At + i)
       out(0) += w0 * x(x0At + i); out(1) += w0 * x(x1At + i); out(2) += w0 * x(x2At + i); out(3) += w0 * x(x3At + i)

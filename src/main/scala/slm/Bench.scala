@@ -12,7 +12,7 @@ object Bench:
     val threads = int("threads", Runtime.getRuntime.availableProcessors())
     val batch = int("batch", 32)
     val rounds = int("rounds", 3)
-    val cfg = Config(vocab = int("vocab", 3613), d = int("d", 128), heads = int("heads", 4), layers = int("layers", 3), context = int("context", 128), ff = int("ff", 512))
+    val cfg = Config(vocab = int("vocab", 3613), d = int("d", 128), heads = int("heads", 4), layers = int("layers", 3), context = int("context", 128), ff = int("ff", 512), attention = opt.getOrElse("attention", "softmax"))
     val model = new Model(cfg)
     val rng = new Random(0)
     val p = model.layout.init(rng)
