@@ -7,5 +7,7 @@ data/works/
 data/list.zip
 data/list_person_all_extended_utf8.csv
 data/corpus.txt
-checkpoints/
+checkpoints/*
+!checkpoints/ja1m-r2/
+checkpoints/ja1m-r2/last/
 *.log

@@ -1,0 +1,6 @@
+vocab=3613
+d=128
+heads=4
+layers=3
+context=128
+ff=512
