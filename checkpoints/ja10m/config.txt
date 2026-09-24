@@ -1,0 +1,6 @@
+vocab=4134
+d=256
+heads=8
+layers=12
+context=256
+ff=1024
