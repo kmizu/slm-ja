@@ -256,6 +256,7 @@ object Train:
     var windowStart = System.nanoTime()
     var totalSaveSeconds = 0.0
     var totalEvalSeconds = 0.0
+    var lastSavedStep = -1L
 
     def writeStatus(): Unit =
       Files.writeString(outDir.resolve("status.txt"),
@@ -268,6 +269,7 @@ object Train:
       val sec = (System.nanoTime() - t0) / 1e9
       totalSaveSeconds += sec
       lastSave = System.nanoTime()
+      lastSavedStep = trainer.stepsDone
       out(f"save  ${trainer.stepsDone}%6d  $tag -> ${gen.getFileName}  ${sec}%.1fs")
       writeStatus()
 
@@ -310,8 +312,8 @@ object Train:
         val stopRequested = stopFile.exists(Files.exists(_))
         if step - startStep >= stopAfter || stopRequested then
           status = "interrupted"
-          save(if stopRequested then "stop-file" else "stopAfterSteps")
-        else if wantSave && step < run.steps then save("periodic")
+          if lastSavedStep != step then save(if stopRequested then "stop-file" else "stopAfterSteps")
+        else if wantSave && step < run.steps && lastSavedStep != step then save("periodic")
       if status == "running" then
         // 予算に到達: 最終評価・最終保存・推論用 export
         val t0 = System.nanoTime()

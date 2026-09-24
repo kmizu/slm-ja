@@ -107,6 +107,22 @@ JDK 25 で `--add-modules=jdk.incubator.vector` が要る（sbt の run / test �
 「そんなことを聞くというのは、なぜ、お話はするんだ。おれのために、あの小林君は、いずれました。」
 ```
 
+## 100M へ（2026-09-25、進行中）
+
+100M パラメータ級の学習に向けて、再開可能な学習基盤を入れた。詳細と実測は [docs/100m-run.md](docs/100m-run.md)。
+
+- 線形注意（`attention=linear`、ヘッドごとの減衰つき、系列長に対して O(n)）を追加。既存の softmax 注意も残っている
+- full-state checkpoint（params / Adam m,v / step / 乱数の規約 / schedule / データの hash）を世代ごとに保存・検証し、`scripts/resume-100m.sh` で続きから再開
+- 評価は forward のみ、勾配集約と AdamW はパラメータ区間で並列、固定 worker pool
+- Preflight（`mode=preflight`）で形状・メモリ・データを配列確保の前に確認
+
+```bash
+SLM_HEAP=12g scripts/run-100m.sh corpus=data/corpus.txt vocabFile=checkpoints/ja10m/vocab.txt \
+  d=768 heads=12 layers=14 ff=3072 context=256 attention=linear batch=32 threads=8 steps=4096 \
+  lr=3e-4 warmup=256 wd=0.1 seed=0 evalEvery=250 saveEvery=250 saveSeconds=600 sampleEvery=0 \
+  stopFile=runs/ja100m/STOP out=runs/ja100m
+```
+
 ## 10M パラメータ版（2026-09-25）
 
 | 項目 | 値 |
