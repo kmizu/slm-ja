@@ -114,7 +114,7 @@ object Train:
 
   val knownKeys: Set[String] = Set("mode", "corpus", "vocabFile", "minCount", "d", "heads", "layers", "context", "ff", "batch", "threads",
     "steps", "stopAfterSteps", "lr", "floorLr", "warmup", "wd", "clip", "seed", "evalEvery", "saveEvery", "saveSeconds", "sampleEvery",
-    "prompt", "out", "resume", "initFrom", "stopFile", "keepGenerations", "split", "attention")
+    "prompt", "out", "resume", "initFrom", "stopFile", "keepGenerations", "split", "attention", "extendTo", "restartWarmup", "restartLr")
 
   def parseArgs(args: Array[String]): Map[String, String] =
     val kv = args.map { a =>
@@ -169,11 +169,21 @@ object Train:
     val split = resumed.flatMap(_._1.meta.get("split")).map(_.toInt).getOrElse((tokens.length * splitRatio).toInt)
     val unkRate = tokens.count(_ == tokenizer.unk).toDouble / tokens.length
 
-    val run = resumed.map(_._1.run).getOrElse {
+    val run0 = resumed.map(_._1.run).getOrElse {
       val cfg = Config(tokenizer.vocabSize, int("d", 128), int("heads", 4), int("layers", 3), int("context", 128), int("ff", 512), str("attention", "softmax"))
       val peak = dbl("lr", 1e-3)
       RunConfig(cfg, int("batch", 32), int("steps", 4096), int("warmup", 256), peak, dbl("floorLr", peak * 0.1), dbl("wd", 0.1), dbl("clip", 1.0), int("seed", 0).toLong)
     }
+    // ---- 延長（warm restart）: 予算を使い切った run を extendTo update まで伸ばす。元の区間の学習率は変えない ----
+    val run = opt.get("extendTo").map(_.toInt) match
+      case Some(to) =>
+        require(resumed.isDefined, "extendTo= は resume= と一緒に使う")
+        RunConfig.extend(run0, to,
+          int("restartWarmup", if run0.isExtended then run0.restartWarmup else 128),
+          dbl("restartLr", if run0.isExtended then run0.restartPeakLr else run0.peakLr * 0.5))
+      case None =>
+        require(!opt.contains("restartWarmup") && !opt.contains("restartLr"), "restartWarmup= と restartLr= は extendTo= と一緒に使う")
+        run0
     for (k, v) <- Seq("d" -> run.cfg.d, "heads" -> run.cfg.heads, "layers" -> run.cfg.layers, "context" -> run.cfg.context, "ff" -> run.cfg.ff, "batch" -> run.batch, "steps" -> run.steps) do
       opt.get(k).foreach(given_ => require(given_.toInt == v, s"resume と CLI の $k が違う: 保存 $v, 指定 $given_"))
     opt.get("attention").foreach(a => require(a == run.cfg.attention, s"resume と CLI の attention が違う: 保存 ${run.cfg.attention}, 指定 $a"))

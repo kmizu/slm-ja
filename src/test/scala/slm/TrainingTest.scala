@@ -199,3 +199,53 @@ class TrainingTest extends munit.FunSuite:
     assertEqualsDouble(run.lr(99), run.floorLr, 1e-12)
     assert((3 until 99).forall(i => run.lr(i) >= run.lr(i + 1)))
   }
+
+  test("延長した学習率: 元の予算までは元と同じ、延長区間は floor から予熱して新ピーク、最終 update で floor") {
+    val base = tinyRun(steps = 100)
+    val ext = RunConfig.extend(base, to = 160, warmup = 4, peakLr = 5e-3)
+    assertEquals(ext.steps, 160); assertEquals(ext.restartAt, 100)
+    assert((0 until 100).forall(i => ext.lr(i) == base.lr(i)))
+    assertEqualsDouble(ext.lr(100), base.floorLr + (5e-3 - base.floorLr) / 4, 1e-12)
+    assertEqualsDouble(ext.lr(103), 5e-3, 1e-12)
+    assertEqualsDouble(ext.lr(159), base.floorLr, 1e-12)
+    assert((100 until 103).forall(i => ext.lr(i) < ext.lr(i + 1)))
+    assert((103 until 159).forall(i => ext.lr(i) >= ext.lr(i + 1)))
+    assertEquals(RunConfig.extend(ext, to = 160, warmup = 4, peakLr = 5e-3), ext) // 同じ延長の再指定（再開時）はそのまま
+    intercept[IllegalArgumentException](RunConfig.extend(base, to = 100, warmup = 4, peakLr = 5e-3)) // 予算を増やさない
+    intercept[IllegalArgumentException](RunConfig.extend(ext, to = 200, warmup = 4, peakLr = 5e-3)) // 2 回目の延長は未対応
+    intercept[IllegalArgumentException](RunConfig.extend(base, to = 104, warmup = 4, peakLr = 5e-3)) // 予熱のあとに下る区間が無い
+  }
+
+  test("延長の設定は設定テキストを往復し、項目の無い古い設定は延長なしとして読める") {
+    def parse(text: String) = text.linesIterator.filter(_.contains('=')).map { l => val i = l.indexOf('='); l.take(i) -> l.drop(i + 1) }.toMap
+    val base = tinyRun(steps = 100)
+    val ext = RunConfig.extend(base, to = 160, warmup = 4, peakLr = 5e-3)
+    assertEquals(RunConfig.fromMap(parse(ext.toText)), ext)
+    assert(!base.toText.contains("restartAt"))
+    assertEquals(RunConfig.fromMap(parse(base.toText)), base)
+    assertEquals(RunConfig.fromMap(parse(base.toText)).restartAt, 0)
+  }
+
+  test("完走した run の state から、延長した設定で続きを学習でき、保存した世代に延長の設定が残る") {
+    val tokens = tokensOf(2000, 13)
+    val pool = new WorkerPool(2)
+    val base = tinyRun(steps = 10)
+    val a = newTrainer(pool, tokens, base); a.initFresh(7L)
+    for _ <- 1 to 10 do a.trainStep()
+    val dir = Files.createTempDirectory("slm-extend")
+    Checkpoint.saveState(dir, a.state(1.0), a.tokenizer)
+    val (st, _) = Checkpoint.loadState(Checkpoint.resolveLatest(dir).get)
+    val ext = RunConfig.extend(st.run, to = 14, warmup = 2, peakLr = 5e-3)
+    val c = newTrainer(pool, tokens, ext); c.restore(st)
+    assertEquals(c.params.toVector, a.params.toVector)
+    for _ <- 1 to 4 do c.trainStep()
+    assertEquals(c.stepsDone, 14L)
+    assert(c.params.forall(x => java.lang.Float.isFinite(x)))
+    assert(c.params.toVector != a.params.toVector)
+    val dir2 = Files.createTempDirectory("slm-extend2")
+    Checkpoint.saveState(dir2, c.state(2.0), c.tokenizer)
+    val (st2, _) = Checkpoint.loadState(Checkpoint.resolveLatest(dir2).get)
+    assertEquals(st2.run, ext); assertEquals(st2.optimizerStep, 14L)
+    pool.shutdown()
+    Checkpoint.deleteRecursively(dir); Checkpoint.deleteRecursively(dir2)
+  }

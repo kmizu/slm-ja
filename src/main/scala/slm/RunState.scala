@@ -15,15 +15,28 @@ final case class RunConfig(
     seed: Long,
     beta1: Double = 0.9,
     beta2: Double = 0.95,
-    eps: Double = 1e-8
+    eps: Double = 1e-8,
+    restartAt: Int = 0,        // 0 なら延長なし。> 0 なら元の予算（この update 数で元の schedule が floor に着く）
+    restartWarmup: Int = 0,    // 延長区間の予熱 update 数（floor → restartPeakLr）
+    restartPeakLr: Double = 0.0
 ):
-  /** 0 起点の update index に対する学習率（予熱つき cosine、最終 update で floor に一致）。 */
+  def isExtended: Boolean = restartAt > 0
+
+  /** 0 起点の update index に対する学習率。
+    *
+    * 元の区間 [0, baseSteps) は予熱つき cosine で、最後の update で floor に一致する。
+    * 延長していれば [restartAt, steps) で floor から restartPeakLr まで予熱し、もう一度 cosine で最終 update の floor まで下ろす（warm restart）。
+    */
   def lr(updateIndex: Long): Double =
-    if updateIndex < warmup then peakLr * (updateIndex + 1).toDouble / warmup
-    else
-      val span = math.max(1L, steps.toLong - 1 - warmup)
-      val progress = math.min(1.0, (updateIndex - warmup).toDouble / span)
-      floorLr + (peakLr - floorLr) * 0.5 * (1 + math.cos(math.Pi * progress))
+    if isExtended && updateIndex >= restartAt then
+      val j = updateIndex - restartAt
+      if j < restartWarmup then floorLr + (restartPeakLr - floorLr) * (j + 1).toDouble / restartWarmup
+      else RunConfig.cosine(j - restartWarmup, steps.toLong - restartAt - restartWarmup, restartPeakLr, floorLr)
+    else if updateIndex < warmup then peakLr * (updateIndex + 1).toDouble / warmup
+    else RunConfig.cosine(updateIndex - warmup, baseSteps.toLong - warmup, peakLr, floorLr)
+
+  /** 元の schedule の長さ。延長していなければ steps。 */
+  def baseSteps: Int = if isExtended then restartAt else steps
 
   def toText: String =
     s"""vocab=${cfg.vocab}
@@ -44,14 +57,37 @@ final case class RunConfig(
        |beta1=$beta1
        |beta2=$beta2
        |eps=$eps
-       |""".stripMargin
+       |""".stripMargin + (if isExtended then s"restartAt=$restartAt\nrestartWarmup=$restartWarmup\nrestartPeakLr=$restartPeakLr\n" else "")
 
 object RunConfig:
   def fromMap(kv: Map[String, String]): RunConfig =
     RunConfig(
       Config(kv("vocab").toInt, kv("d").toInt, kv("heads").toInt, kv("layers").toInt, kv("context").toInt, kv("ff").toInt, kv.getOrElse("attention", "softmax")),
       kv("batch").toInt, kv("steps").toInt, kv("warmup").toInt, kv("peakLr").toDouble, kv("floorLr").toDouble,
-      kv("weightDecay").toDouble, kv("clip").toDouble, kv("seed").toLong, kv("beta1").toDouble, kv("beta2").toDouble, kv("eps").toDouble)
+      kv("weightDecay").toDouble, kv("clip").toDouble, kv("seed").toLong, kv("beta1").toDouble, kv("beta2").toDouble, kv("eps").toDouble,
+      kv.get("restartAt").map(_.toInt).getOrElse(0), kv.get("restartWarmup").map(_.toInt).getOrElse(0),
+      kv.get("restartPeakLr").map(_.toDouble).getOrElse(0.0))
+
+  /** [0, length) の i に対し、peak から始めて最後の i = length - 1 で floor に着く cosine。 */
+  def cosine(i: Long, length: Long, peak: Double, floor: Double): Double =
+    val span = math.max(1L, length - 1)
+    val progress = math.min(1.0, i.toDouble / span)
+    floor + (peak - floor) * 0.5 * (1 + math.cos(math.Pi * progress))
+
+  /** 予算 `run.steps` を使い切った run を `to` update まで延長する（warm restart）。
+    *
+    * 元の区間の学習率は変えない。同じ延長をもう一度指定した場合（延長 run の再開）はそのまま返す。
+    */
+  def extend(run: RunConfig, to: Int, warmup: Int, peakLr: Double): RunConfig =
+    if run.isExtended then
+      require(to == run.steps && warmup == run.restartWarmup && peakLr == run.restartPeakLr,
+        s"延長は 1 回だけ対応: 保存済みは restartAt=${run.restartAt} steps=${run.steps} warmup=${run.restartWarmup} peak=${run.restartPeakLr}")
+      run
+    else
+      require(to > run.steps, s"延長先 $to は今の予算 ${run.steps} より大きくする")
+      require(warmup >= 1 && to - run.steps > warmup, s"延長区間 ${to - run.steps} が予熱 $warmup より長くない")
+      require(peakLr > run.floorLr, s"延長のピーク $peakLr は floor ${run.floorLr} より大きくする")
+      run.copy(steps = to, restartAt = run.steps, restartWarmup = warmup, restartPeakLr = peakLr)
 
 /** データ抽出。step と seed から決定的に窓の開始位置を作る（初期化の乱数消費とは独立）。 */
 object Sampler:
