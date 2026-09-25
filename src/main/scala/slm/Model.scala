@@ -165,6 +165,30 @@ final class Model(val cfg: Config):
     while t0 < T do
       val tEnd = math.min(T, t0 + tokenTile)
       var o = 0
+      // dW: 重み 2 行 × トークン 4 本（トークン 4 本の読み込みを 2 行で共有）。行ごとの積和の順序は 1 行ずつのときと同じ
+      while o + 1 < out do
+        val row0 = w + o * in
+        val row1 = row0 + in
+        var t = t0
+        while t + 3 < tEnd do
+          val g00 = dy(t * out + o); val g01 = dy((t + 1) * out + o); val g02 = dy((t + 2) * out + o); val g03 = dy((t + 3) * out + o)
+          val g10 = dy(t * out + o + 1); val g11 = dy((t + 1) * out + o + 1); val g12 = dy((t + 2) * out + o + 1); val g13 = dy((t + 3) * out + o + 1)
+          val nz0 = g00 != 0f || g01 != 0f || g02 != 0f || g03 != 0f
+          val nz1 = g10 != 0f || g11 != 0f || g12 != 0f || g13 != 0f
+          if nz0 then g(b + o) += g00 + g01 + g02 + g03
+          if nz1 then g(b + o + 1) += g10 + g11 + g12 + g13
+          if nz0 && nz1 then
+            Simd.axpy4x2(g, row0, row1, g00, g01, g02, g03, g10, g11, g12, g13, x, t * in, (t + 1) * in, (t + 2) * in, (t + 3) * in, in)
+          else if nz0 then Simd.axpy4(g, row0, g00, g01, g02, g03, x, t * in, (t + 1) * in, (t + 2) * in, (t + 3) * in, in)
+          else if nz1 then Simd.axpy4(g, row1, g10, g11, g12, g13, x, t * in, (t + 1) * in, (t + 2) * in, (t + 3) * in, in)
+          t += 4
+        while t < tEnd do
+          val gy0 = dy(t * out + o)
+          if gy0 != 0f then { g(b + o) += gy0; Simd.axpy(g, row0, gy0, x, t * in, in) }
+          val gy1 = dy(t * out + o + 1)
+          if gy1 != 0f then { g(b + o + 1) += gy1; Simd.axpy(g, row1, gy1, x, t * in, in) }
+          t += 1
+        o += 2
       while o < out do
         val row = w + o * in
         var t = t0
@@ -182,9 +206,22 @@ final class Model(val cfg: Config):
           t += 1
         o += 1
       o = 0
+      // dx: トークン 2 本 × 重み 4 行（重み 4 行の読み込みを 2 トークンで共有）。dx の行ごとの積和の順序は 1 トークンずつのときと同じ
       while o + 3 < out do
         val row0 = w + o * in
         var t = t0
+        while t + 1 < tEnd do
+          val at = t * out + o
+          val bt = at + out
+          val g0 = dy(at); val g1 = dy(at + 1); val g2 = dy(at + 2); val g3 = dy(at + 3)
+          val h0 = dy(bt); val h1 = dy(bt + 1); val h2 = dy(bt + 2); val h3 = dy(bt + 3)
+          val nzA = g0 != 0f || g1 != 0f || g2 != 0f || g3 != 0f
+          val nzB = h0 != 0f || h1 != 0f || h2 != 0f || h3 != 0f
+          if nzA && nzB then
+            Simd.axpy4x2(dx, t * in, (t + 1) * in, g0, g1, g2, g3, h0, h1, h2, h3, p, row0, row0 + in, row0 + 2 * in, row0 + 3 * in, in)
+          else if nzA then Simd.axpy4(dx, t * in, g0, g1, g2, g3, p, row0, row0 + in, row0 + 2 * in, row0 + 3 * in, in)
+          else if nzB then Simd.axpy4(dx, (t + 1) * in, h0, h1, h2, h3, p, row0, row0 + in, row0 + 2 * in, row0 + 3 * in, in)
+          t += 2
         while t < tEnd do
           val at = t * out + o
           val g0 = dy(at); val g1 = dy(at + 1); val g2 = dy(at + 2); val g3 = dy(at + 3)

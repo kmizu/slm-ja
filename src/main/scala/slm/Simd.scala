@@ -121,6 +121,37 @@ object Simd:
       y(yAt + i) += a0 * x(x0At + i) + a1 * x(x1At + i) + a2 * x(x2At + i) + a3 * x(x3At + i)
       i += 1
 
+  /** y0 += a00 x0 + a01 x1 + a02 x2 + a03 x3、y1 += a10 x0 + a11 x1 + a12 x2 + a13 x3（x の 4 本の読み込みを 2 本の出力で共有）。
+    * 出力 1 本ぶんの積和の順序と端数処理は `axpy4` と同じ（結果は bit 一致）。
+    */
+  def axpy4x2(y: Array[Float], y0At: Int, y1At: Int,
+              a00: Float, a01: Float, a02: Float, a03: Float, a10: Float, a11: Float, a12: Float, a13: Float,
+              x: Array[Float], x0At: Int, x1At: Int, x2At: Int, x3At: Int, n: Int): Unit =
+    val v00 = FloatVector.broadcast(S, a00); val v01 = FloatVector.broadcast(S, a01)
+    val v02 = FloatVector.broadcast(S, a02); val v03 = FloatVector.broadcast(S, a03)
+    val v10 = FloatVector.broadcast(S, a10); val v11 = FloatVector.broadcast(S, a11)
+    val v12 = FloatVector.broadcast(S, a12); val v13 = FloatVector.broadcast(S, a13)
+    var i = 0
+    val bound = n - (n % lanes)
+    while i < bound do
+      val x0 = FloatVector.fromArray(S, x, x0At + i)
+      val x1 = FloatVector.fromArray(S, x, x1At + i)
+      val x2 = FloatVector.fromArray(S, x, x2At + i)
+      val x3 = FloatVector.fromArray(S, x, x3At + i)
+      var acc0 = FloatVector.fromArray(S, y, y0At + i)
+      var acc1 = FloatVector.fromArray(S, y, y1At + i)
+      acc0 = x0.fma(v00, acc0); acc1 = x0.fma(v10, acc1)
+      acc0 = x1.fma(v01, acc0); acc1 = x1.fma(v11, acc1)
+      acc0 = x2.fma(v02, acc0); acc1 = x2.fma(v12, acc1)
+      acc0 = x3.fma(v03, acc0); acc1 = x3.fma(v13, acc1)
+      acc0.intoArray(y, y0At + i)
+      acc1.intoArray(y, y1At + i)
+      i += lanes
+    while i < n do
+      y(y0At + i) += a00 * x(x0At + i) + a01 * x(x1At + i) + a02 * x(x2At + i) + a03 * x(x3At + i)
+      y(y1At + i) += a10 * x(x0At + i) + a11 * x(x1At + i) + a12 * x(x2At + i) + a13 * x(x3At + i)
+      i += 1
+
   /** y0 += a0*w, y1 += a1*w, y2 += a2*w, y3 += a3*w（w の読み込みを 4 本で共有） */
   def spread4(y: Array[Float], y0At: Int, y1At: Int, y2At: Int, y3At: Int, a0: Float, a1: Float, a2: Float, a3: Float,
               w: Array[Float], wAt: Int, n: Int): Unit =
