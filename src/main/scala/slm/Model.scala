@@ -122,7 +122,14 @@ final class Model(val cfg: Config):
   /** トークンのタイル幅。x のタイル（TT × in × 4B）が L2 に収まる大きさにする（in=3072 で 768 KiB）。 */
   private val tokenTile = 64
 
+  /** C のカーネル（native/libslmkern.so、AVX-512）を使うか。結果は Scala のカーネルと bit 一致する（NativeKernelTest）。 */
+  private def useNative: Boolean = Simd.lanes == 16 && NativeKernels.enabled()
+
   private def denseAll(p: Array[Float], w: Int, b: Int, in: Int, out: Int, x: Array[Float], y: Array[Float], T: Int, out4: Array[Float]): Unit =
+    if useNative then NativeKernels.denseForward(p, w, b, in, out, x, y, T)
+    else denseAllScala(p, w, b, in, out, x, y, T, out4)
+
+  private def denseAllScala(p: Array[Float], w: Int, b: Int, in: Int, out: Int, x: Array[Float], y: Array[Float], T: Int, out4: Array[Float]): Unit =
     var t0 = 0
     while t0 < T do
       val tEnd = math.min(T, t0 + tokenTile)
@@ -161,6 +168,11 @@ final class Model(val cfg: Config):
     */
   private def denseBackwardAll(p: Array[Float], g: Array[Float], w: Int, b: Int, in: Int, out: Int,
                                x: Array[Float], dy: Array[Float], dx: Array[Float], T: Int): Unit =
+    if useNative then NativeKernels.denseBackward(p, g, w, b, in, out, x, dy, dx, T)
+    else denseBackwardAllScala(p, g, w, b, in, out, x, dy, dx, T)
+
+  private def denseBackwardAllScala(p: Array[Float], g: Array[Float], w: Int, b: Int, in: Int, out: Int,
+                                    x: Array[Float], dy: Array[Float], dx: Array[Float], T: Int): Unit =
     var t0 = 0
     while t0 < T do
       val tEnd = math.min(T, t0 + tokenTile)

@@ -198,7 +198,8 @@ object Train:
     val est = Preflight.estimate(cfg)
     val report = new StringBuilder
     report.append(s"corpus=$corpusPath chars=${text.length} tokens=${tokens.length} vocab=${tokenizer.vocabSize} unkRate=${f"$unkRate%.5f"} split=$split corpusSha256=$corpusHash vocabHash=${tokenizer.hash}\n")
-    report.append(s"config=$cfg batch=${run.batch} steps=${run.steps} workers=$workers lanes=${Simd.lanes}\n")
+    val kernels = if Simd.lanes == 16 && NativeKernels.enabled() then "native" else s"scala (${NativeKernels.STATUS})"
+    report.append(s"config=$cfg batch=${run.batch} steps=${run.steps} workers=$workers lanes=${Simd.lanes} kernels=$kernels\n")
     report.append(est.toText(Seq(1, 2, 4, 8, 16).filter(_ <= run.batch), Preflight.heapBytes))
     println(report)
     if mode == "preflight" then

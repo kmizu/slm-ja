@@ -34,6 +34,8 @@ sbt "runMain slm.Train steps=3000 batch=32"          # 学習（checkpoints/ja1m
 sbt "runMain slm.Generate prompt=　吾輩は count=200"   # 生成（1 文字ずつの推論。method=recompute で旧方式、time=1 で所要時間）
 ```
 
+密な層の順伝播と逆伝播は、AVX-512 の CPU では C のカーネル（`native/slmkern.c`、Java の FFM API で呼ぶ）で動きます。結果は Scala のカーネルと bit 単位で同じで、C コンパイラが無い環境や `-Dslm.native=false` では Scala のカーネルで動きます。行列ライブラリは使っていません。
+
 生成は層ごとの状態を持ち回す `Decoder` で行います。線形注意では 1 文字あたりの計算が文脈長に依らず、softmax 注意は KV キャッシュを使います。
 
 長く回すときは sbt を介さず `java -cp` で起動する方が楽です（`sbt "export Runtime/fullClasspath"`）。

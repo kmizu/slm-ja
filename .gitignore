@@ -14,3 +14,5 @@ checkpoints/ja1m-r2/last/
 checkpoints/ja10m/last/
 *.log
 runs/
+native/*.so
+native/*.tmp
