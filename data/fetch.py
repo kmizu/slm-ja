@@ -67,7 +67,7 @@ def fetch(row):
     data = None
     for u in (gh, url):
         try:
-            req = urllib.request.Request(u, headers={"User-Agent": "slm-ja-1m corpus builder"})
+            req = urllib.request.Request(u, headers={"User-Agent": "slm-ja corpus builder"})
             with urllib.request.urlopen(req, timeout=60) as resp:
                 data = resp.read()
             break

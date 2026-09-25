@@ -3,7 +3,7 @@ ThisBuild / organization := "io.github.kmizu"
 
 lazy val root = (project in file("."))
   .settings(
-    name := "slm-ja-1m",
+    name := "slm-ja",
     scalacOptions ++= Seq("-deprecation", "-feature", "-Wunused:all"),
     libraryDependencies += "org.scalameta" %% "munit" % "1.1.1" % Test,
     Compile / run / fork := true,
