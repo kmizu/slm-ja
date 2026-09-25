@@ -5,11 +5,11 @@ import scala.util.Random
 
 /** 固定した評価窓と固定プロンプトで checkpoint を評価・生成する。10M と 100M を同じ条件で比べるために使う。
   *
-  *   runMain slm.Evaluate checkpoint=checkpoints/ja10m corpus=data/corpus.txt [split=0.97] [threads=2] [count=200]
+  *   runMain slm.Evaluate checkpoint=checkpoints/ja10m corpus=data/corpus.txt [split=0.97] [threads=2] [count=200] [eval=quick64,final1024]
   *   runMain slm.Evaluate state=runs/ja100m/state/step-00000750 export=runs/ja100m/export-750 corpus=data/corpus.txt
   *
   * `state=` は full-state の世代から重みを読み、`export=` があれば推論用の旧形式（params.bin/config.txt/vocab.txt）へ書き出す。
-  * 損失は quick64（`even64-v1`）と final1024（`even1024-v1`）の両方。窓は検証領域（split 以降）に均等配置。
+  * 損失は quick64（`even64-v1`）と final1024（`even1024-v1`）。`eval=` で絞れて、`eval=` を空にすると生成だけ行う。窓は検証領域（split 以降）に均等配置。
   */
 object Evaluate:
 
@@ -51,7 +51,8 @@ object Evaluate:
         sums(th) = s
       }
       sums.sum / windows.length
-    for (name, n) <- Seq("quick64" -> 64, "final1024" -> 1024) do
+    val evalSets = opt.getOrElse("eval", "quick64,final1024").split(",").filter(_.nonEmpty).toSeq
+    for (name, n) <- Seq("quick64" -> 64, "final1024" -> 1024) if evalSets.contains(name) do
       val windows = EvalWindows.starts(split, tokens.length, cfg.context, n)
       val t0 = System.nanoTime()
       val loss = evaluate(windows)
