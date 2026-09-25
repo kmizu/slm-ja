@@ -1,6 +1,6 @@
-# slm-ja-1m
+# slm-ja
 
-日本語だけで学習する、約 1M パラメータの小さな言語モデル（SLM）。Scala 3 で、行列ライブラリを使わず、
+日本語だけで学習する小さな言語モデル（SLM）。1M・10M・100M パラメータの 3 段階を同じコードで学習しています。Scala 3 で、行列ライブラリを使わず、
 ニューロンごとのループで順伝播と逆伝播を手で書いています。依存は Scala 標準ライブラリだけ。
 
 「[行列を使わない Transformer 入門](https://kmizu.github.io/no-matrix-transformer/)」の続きとして、
@@ -31,8 +31,10 @@ python3 data/fetch.py 6000000
 ```bash
 sbt test                                             # 勾配検査（数値微分と 1e-5 で一致）ほか
 sbt "runMain slm.Train steps=3000 batch=32"          # 学習（checkpoints/ja1m に保存）
-sbt "runMain slm.Generate prompt=　吾輩は count=200"   # 生成
+sbt "runMain slm.Generate prompt=　吾輩は count=200"   # 生成（1 文字ずつの推論。method=recompute で旧方式、time=1 で所要時間）
 ```
+
+生成は層ごとの状態を持ち回す `Decoder` で行います。線形注意では 1 文字あたりの計算が文脈長に依らず、softmax 注意は KV キャッシュを使います。
 
 長く回すときは sbt を介さず `java -cp` で起動する方が楽です（`sbt "export Runtime/fullClasspath"`）。
 
@@ -127,6 +129,9 @@ CPU 1 台（Ryzen 7 8700G、8 workers）で 26.6 時間、平均 343 tok/s。詳
 「小次郎どの」
 　と、いった。
 ```
+
+2026-09-26 から、学習データの 1 エポック（8,410 updates）まで warm restart で延長している（`extendTo=`、詳細は docs）。
+生成は 1 文字ずつの推論に切り替えて、100M で 1 文字あたり約 7 倍速くなった。
 
 重み（1 世代 1.15 GiB）はリポジトリに含めていない。下のコマンドで同じ run を再現できる。学習基盤の中身は次のとおり。
 
