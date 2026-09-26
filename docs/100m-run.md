@@ -161,6 +161,7 @@ SLM_HEAP=12g scripts/run-100m.sh resume=runs/ja100m out=runs/ja100m-e1 corpus=da
 - 窓の抽出は `(seed, step)` から決まるので、延長区間の step 4096 以降は初回予算と重ならない新しい乱数列になる。
 - テスト（`TrainingTest`）: 延長前の区間の学習率が元と完全に一致、延長区間の予熱と最終 floor、設定テキストの往復と延長なしの旧設定の読み込み、完走 state からの延長学習と世代への保存。
 - ディスク: 延長 run は保存中に最大 4 世代（1 世代 1.15 GiB）を抱える。空き 5.4 GiB では足りないので、`runs/ja100m/state/step-00004087`（最終世代の 9 step 前の定期保存）を消した。best（4000）と final（4096）は残している。
+- 2026-09-27、ディスクの空きが無くなったので、代わりの効く保存を消した: 初回 run の full-state（step 4000・4096。重みは `export-best` / `export-final` に残る）、延長 run の step 4500（最新の 4525 は残す）、途中の推論用書き出し（step 1333・1359・2311）。初回 run の `state/last` と `state/best` は消した世代を指したまま残っている（初回 run からは再開できない）。
 
 ## 生成の高速化（`Decoder`）
 
