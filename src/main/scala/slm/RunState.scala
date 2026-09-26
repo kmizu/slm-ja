@@ -46,6 +46,7 @@ final case class RunConfig(
        |context=${cfg.context}
        |ff=${cfg.ff}
        |attention=${cfg.attention}
+       |positions=${cfg.positions}
        |batch=$batch
        |steps=$steps
        |warmup=$warmup
@@ -62,7 +63,8 @@ final case class RunConfig(
 object RunConfig:
   def fromMap(kv: Map[String, String]): RunConfig =
     RunConfig(
-      Config(kv("vocab").toInt, kv("d").toInt, kv("heads").toInt, kv("layers").toInt, kv("context").toInt, kv("ff").toInt, kv.getOrElse("attention", "softmax")),
+      Config(kv("vocab").toInt, kv("d").toInt, kv("heads").toInt, kv("layers").toInt, kv("context").toInt, kv("ff").toInt, kv.getOrElse("attention", "softmax"),
+        kv.getOrElse("positions", "learned")),
       kv("batch").toInt, kv("steps").toInt, kv("warmup").toInt, kv("peakLr").toDouble, kv("floorLr").toDouble,
       kv("weightDecay").toDouble, kv("clip").toDouble, kv("seed").toLong, kv("beta1").toDouble, kv("beta2").toDouble, kv("eps").toDouble,
       kv.get("restartAt").map(_.toInt).getOrElse(0), kv.get("restartWarmup").map(_.toInt).getOrElse(0),

@@ -12,7 +12,8 @@ object BenchTrain:
     val steps = int("steps", 6)
     val workers = int("threads", 8)
     val vocab = opt.get("vocabFile").map(f => Tokenizer.load(Path.of(f))).getOrElse(new Tokenizer((0x3041 to 0x30FF).map(_.toChar).toVector))
-    val cfg = Config(vocab.vocabSize, int("d", 768), int("heads", 12), int("layers", 14), int("context", 256), int("ff", 3072), opt.getOrElse("attention", "softmax"))
+    val cfg = Config(vocab.vocabSize, int("d", 768), int("heads", 12), int("layers", 14), int("context", 256), int("ff", 3072), opt.getOrElse("attention", "softmax"),
+      opt.getOrElse("positions", "learned"))
     val batch = int("batch", 32)
     Preflight.validate(cfg, batch, workers)
     val est = Preflight.estimate(cfg)

@@ -6,6 +6,7 @@ import scala.util.Random
   *
   * 各要素への積和の順序を保ったまま読み込みの共有だけを変える最適化なら、結果は bit 一致する。
   * 指紋の値は書き換え前のカーネル（dot4x2 / axpy4）で記録したもの。積和の順序を意図して変えたときだけ更新する。
+  * C のカーネル（16 レーンの CPU で既定）もこの指紋と一致する。
   * 幅 48・FF 80・語彙 37・文脈 11 は、SIMD の端数（16 レーン）、行の端数（4 行・2 行）、トークンの端数（4 本）の分岐を全部通すため。
   */
 class KernelGoldenTest extends munit.FunSuite:
@@ -30,15 +31,18 @@ class KernelGoldenTest extends munit.FunSuite:
     while i < a.length do { h = 31 * h + java.lang.Float.floatToRawIntBits(a(i)); i += 1 }
     h
 
-  test("linear: 順伝播の logits と勾配の指紋が書き換え前のカーネルと一致する") {
-    assertEquals(fingerprint("linear"), (LinearLogits, LinearGrad))
-  }
+  /** レーン数ごとの指紋。16 レーン（AVX-512）と 8 レーン（AVX2、Ryzen 9 5900X など）では合計の畳み方が違うので値も違う。
+    * 8 レーンの値は `-XX:MaxVectorSize=32` で記録した。ベクトル演算の結果はレーンごとに決まるので、同じレーン数ならどの CPU でも同じ値になる。
+    */
+  private val expected: Map[(Int, String), (Long, Long)] = Map(
+    (16, "linear") -> (7889698432477047824L, -3943957894805727470L),
+    (16, "softmax") -> (-2060405393796565635L, 4813400518847319763L),
+    (8, "linear") -> (-6233283105396001394L, 1839746162347260054L),
+    (8, "softmax") -> (-7126880552004492285L, 3714910034561462412L))
 
-  test("softmax: 順伝播の logits と勾配の指紋が書き換え前のカーネルと一致する") {
-    assertEquals(fingerprint("softmax"), (SoftmaxLogits, SoftmaxGrad))
-  }
-
-  private val LinearLogits = 7889698432477047824L
-  private val LinearGrad = -3943957894805727470L
-  private val SoftmaxLogits = -2060405393796565635L
-  private val SoftmaxGrad = 4813400518847319763L
+  for attention <- Seq("linear", "softmax") do
+    test(s"$attention: 順伝播の logits と勾配の指紋が書き換え前のカーネルと一致する") {
+      val key = (Simd.lanes, attention)
+      assume(expected.contains(key), s"${Simd.lanes} レーンの指紋は記録していない")
+      assertEquals(fingerprint(attention), expected(key))
+    }

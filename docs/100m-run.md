@@ -246,6 +246,42 @@ Java 標準の FFM API（`Linker.Option.critical(true)` で float[] をコピー
 1 スレッドでは 60〜76 GFLOPS 出ているのに、8 workers では 1 コアあたり約 28 GFLOPS だった。損の大半は、各 worker がタイルごとに重み 410 MB を読み直し、共有の L3 とメモリを取り合うことにあった。タイルを 128 にして重みの読み直しを半分にしたのが一番効いた。256 では x の塊が L2 に収まらず遅くなる。
 延長学習は step 4,330 から C のカーネル（タイル 128）で再開した。結果は bit 一致なので、数値は Scala のカーネルのまま続けた場合と変わらない。
 
+## 次の本番: 位置埋め込みなし・最初から 1 エポック（別 PC で実行予定、2026-09-26）
+
+コウタの判断で、延長学習（`runs/ja100m-e1`）は step 4,525（37.1M トークン）で止めた（`STOP` で境界保存、`scripts/resume-100m.sh run=runs/ja100m-e1` で再開できる）。
+このマシン（WSL）の CPU を空けるため、次の本番は別の PC（Ryzen 9 5900X、Zen 3、12 コア / 24 スレッド、AVX2、L3 32 MB × 2）で回す。
+
+変更点:
+
+- **位置埋め込みなし（`positions=none`）**: 学習する位置埋め込みを持たず、位置の情報は線形注意の減衰だけが担う（Kimi Linear の線形注意層と同じ考え方）。重みが文脈長に依らなくなり、生成は窓を詰め直さずに状態を持ち回し続けられる（1 文字あたり O(1)）。パラメータは 196,608 個減って 102,410,790。
+- **最初から 1 エポックの予算**: 8,410 updates の cosine を 1 本で組む（warm restart の跳ねがない）。
+- **BF16 は見送り**: `vdpbf16ps` は AVX-512 BF16（Zen 4 以降）の命令で、5900X には無い。
+- 5900X には AVX-512 が無いので、C のカーネルは作られず Scala のカーネル（8 レーン）で動く。8 レーンでも全テストが通ることを `-XX:MaxVectorSize=32` で確かめた（C のカーネルのテスト 3 件は飛ばされる）。`KernelGoldenTest` の指紋はレーン数ごとに持つ。
+- テスト（`PositionsTest`、`GradientCheckTest`）: 位置埋め込みなしの勾配検査（Double 参照・Float32、softmax・線形注意）、パラメータ数、文脈長の違う模型で同じ出力、線形注意で文脈長の 3 倍まで 1 文字ずつの推論が長い文脈の順伝播と一致、設定と checkpoint の往復、項目の無い古い設定は位置埋め込みありとして読む。
+
+別 PC での手順:
+
+```bash
+# JDK 25（Vector API は incubator）と sbt を入れておく
+git clone git@github.com:kmizu/slm-ja.git && cd slm-ja
+# コーパスはこのマシンの data/corpus.txt（SHA-256 8007ba16…）をコピーする（fetch.py で作り直すと青空文庫の索引の更新で中身が変わりうる）
+sha256sum data/corpus.txt
+sbt test
+# 1) 形とメモリの確認
+SLM_HEAP=12g scripts/run-100m.sh mode=preflight corpus=data/corpus.txt vocabFile=checkpoints/ja10m/vocab.txt \
+  d=768 heads=12 layers=14 ff=3072 context=256 attention=linear positions=none batch=32 threads=12 out=runs/ja100m-nope-preflight
+# 2) 速さ（worker 数を 12 と 8 で比べる）
+java -Xmx12g -XX:+UseParallelGC --add-modules=jdk.incubator.vector -cp "$(cat target/classpath.txt)" slm.BenchTrain \
+  vocabFile=checkpoints/ja10m/vocab.txt attention=linear positions=none threads=12 batch=32 steps=5
+# 3) 本番（pilot として stopAfterSteps=250 で止め、quick64 を初回 run の step 250（4.014）と比べてから resume で続ける）
+SLM_HEAP=12g scripts/run-100m.sh corpus=data/corpus.txt vocabFile=checkpoints/ja10m/vocab.txt \
+  d=768 heads=12 layers=14 ff=3072 context=256 attention=linear positions=none batch=32 threads=12 steps=8410 stopAfterSteps=250 \
+  lr=3e-4 warmup=256 wd=0.1 seed=0 evalEvery=250 saveEvery=250 saveSeconds=1800 sampleEvery=0 stopFile=runs/ja100m-nope/STOP out=runs/ja100m-nope
+SLM_HEAP=12g scripts/resume-100m.sh run=runs/ja100m-nope threads=12 evalEvery=250 saveEvery=250 saveSeconds=1800 sampleEvery=0
+```
+
+step 250 までは学習率が予熱だけなので、初回 run（4,096 steps の cosine）と同じ学習率で比べられる。見込みは 5900X の実測次第で、1 エポックに 26〜48 時間。
+
 ## 採用した最適化と見送ったもの
 
 | 項目 | 結果 |

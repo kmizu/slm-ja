@@ -3,9 +3,13 @@ package slm
 import scala.util.Random
 
 /** モデルの大きさ。 */
-final case class Config(vocab: Int, d: Int, heads: Int, layers: Int, context: Int, ff: Int, attention: String = "softmax"):
+final case class Config(vocab: Int, d: Int, heads: Int, layers: Int, context: Int, ff: Int, attention: String = "softmax",
+                        positions: String = "learned"):
   require(d % heads == 0, "d はヘッド数で割り切れること")
   require(attention == "softmax" || attention == "linear", s"attention は softmax か linear: $attention")
+  require(positions == "learned" || positions == "none", s"positions は learned か none: $positions")
+  /** 学習する位置埋め込みを持つか。none なら位置の情報は線形注意の減衰（softmax なら因果マスク）だけが担い、重みは文脈長に依らない。 */
+  def hasPositions: Boolean = positions == "learned"
   val headDim: Int = d / heads
   def isLinear: Boolean = attention == "linear"
   /** 線形注意の減衰（ヘッドごと）。RetNet と同じ 1 - 2^-(5+h)。 */
@@ -24,7 +28,7 @@ final class Layout(val cfg: Config):
     at.toInt
 
   val tok: Int = take(cfg.vocab.toLong * cfg.d)   // トークン埋め込み（出力ヘッドと共有）
-  val pos: Int = take(cfg.context.toLong * cfg.d)        // 位置埋め込み
+  val pos: Int = take(if cfg.hasPositions then cfg.context.toLong * cfg.d else 0L) // 位置埋め込み（positions=none なら長さ 0）
   final case class Layer(ln1g: Int, ln1b: Int, wq: Int, bq: Int, wk: Int, bk: Int, wv: Int, bv: Int, wo: Int, bo: Int,
                          ln2g: Int, ln2b: Int, w1: Int, b1: Int, w2: Int, b2: Int)
   val layer: Vector[Layer] = Vector.fill(cfg.layers) {
@@ -47,7 +51,7 @@ final class Layout(val cfg: Config):
         i += 1
     def ones(at: Int, n: Int): Unit = java.util.Arrays.fill(p, at, at + n, 1.0f)
     fill(tok, cfg.vocab * cfg.d, 0.02)
-    fill(pos, cfg.context * cfg.d, 0.02)
+    if cfg.hasPositions then fill(pos, cfg.context * cfg.d, 0.02)
     val residualScale = 0.02 / math.sqrt(2.0 * cfg.layers)
     for l <- layer do
       ones(l.ln1g, cfg.d); ones(l.ln2g, cfg.d)
@@ -303,11 +307,12 @@ final class Model(val cfg: Config):
     var t = 0
     while t < T do
       val tokAt = L.tok + tokens(start + t) * d
-      val posAt = L.pos + t * d
       var i = 0
-      while i < d do
-        x0(t * d + i) = p(tokAt + i) + p(posAt + i)
-        i += 1
+      if cfg.hasPositions then
+        val posAt = L.pos + t * d
+        while i < d do { x0(t * d + i) = p(tokAt + i) + p(posAt + i); i += 1 }
+      else
+        while i < d do { x0(t * d + i) = p(tokAt + i); i += 1 }
       t += 1
     val tmp = ws.tmp
     val rAll = ws.rAll
@@ -598,7 +603,7 @@ final class Model(val cfg: Config):
       var i = 0
       while i < d do
         g(tokAt + i) += dx(t * d + i)
-        g(posAt + i) += dx(t * d + i)
+        if cfg.hasPositions then g(posAt + i) += dx(t * d + i)
         i += 1
       t += 1
 

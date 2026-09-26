@@ -49,6 +49,11 @@ final class Decoder(val model: Model, p: Array[Float], pool: Option[WorkerPool] 
   /** これまでに読んだ文字数（次の文字の位置）。 */
   def position: Int = pos
 
+  /** 文脈長で止まるか。位置埋め込みがある（位置が context 個しかない）か、softmax 注意（KV キャッシュが context 個）なら true。
+    * 線形注意 + 位置埋め込みなしなら、状態を持ち回すだけなので何文字でも続けられる。
+    */
+  val bounded: Boolean = cfg.hasPositions || !cfg.isLinear
+
   /** 状態を捨てて位置 0 からやり直す。 */
   def reset(): Unit =
     pos = 0
@@ -86,12 +91,15 @@ final class Decoder(val model: Model, p: Array[Float], pool: Option[WorkerPool] 
 
   /** 文字 `token` を位置 `position` に読み、次の文字の logits を返す（返す配列は内部のもので、次の step で上書きされる）。 */
   def step(token: Int): Array[Float] =
-    require(pos < cfg.context, s"位置 $pos は位置埋め込みの数 ${cfg.context} を超える。reset して窓を詰め直す")
+    require(!bounded || pos < cfg.context, s"位置 $pos は文脈長 ${cfg.context} を超える。reset して窓を詰め直す")
     require(token >= 0 && token < cfg.vocab, s"文字 id $token が語彙の外")
     val tokAt = L.tok + token * d
-    val posAt = L.pos + pos * d
     var i = 0
-    while i < d do { x(i) = p(tokAt + i) + p(posAt + i); i += 1 }
+    if cfg.hasPositions then
+      val posAt = L.pos + pos * d
+      while i < d do { x(i) = p(tokAt + i) + p(posAt + i); i += 1 }
+    else
+      while i < d do { x(i) = p(tokAt + i); i += 1 }
     var l = 0
     while l < cfg.layers do
       val ly = L.layer(l)

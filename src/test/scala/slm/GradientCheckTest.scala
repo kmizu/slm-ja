@@ -57,6 +57,15 @@ class GradientCheckTest extends munit.FunSuite:
   test("Float32 版の損失と勾配は Double の参照実装と一致する（系列長が 4 の倍数でも、そうでなくても）") { floatVsDouble(cfg, refCfg) }
   test("線形注意でも Float32 版は Double 参照と一致する") { floatVsDouble(linCfg, linRef) }
 
+  private val nopeCfg = cfg.copy(positions = "none")
+  private val nopeRef = refCfg.copy(positions = "none")
+  test("位置埋め込みなしの参照実装（Double）も数値微分と一致する（softmax・線形注意）") {
+    numericCheck(nopeRef); numericCheck(nopeRef.copy(attention = "linear"))
+  }
+  test("位置埋め込みなしでも Float32 版は Double 参照と一致する（softmax・線形注意）") {
+    floatVsDouble(nopeCfg, nopeRef); floatVsDouble(nopeCfg.copy(attention = "linear"), nopeRef.copy(attention = "linear"))
+  }
+
   test("パラメータ数が手計算と一致する") {
     val model = new Model(cfg)
     val d = cfg.d

@@ -10,7 +10,8 @@ object Generate:
     *
     * 状態を持ち回すので、線形注意では 1 文字あたりの計算が文脈長に依らない（softmax 注意は KV キャッシュで、今の q との内積だけ）。
     * プロンプトの読み込みと窓の詰め直しは一括の順伝播（`Decoder.prefill`）で行う。
-    * 位置埋め込みが context 個しかないので、位置が context に達したら直近 context/2 文字で窓を詰め直して続ける。
+    * 位置埋め込みがある（または softmax 注意）なら、位置が context に達したら直近 context/2 文字で窓を詰め直して続ける。
+    * 線形注意 + 位置埋め込みなしなら、詰め直さずに状態を持ち回し続ける。
     * 全体が context 文字以内なら、毎回計算し直す `sampleRecompute` と同じ文字列になる。
     */
   def sample(model: Model, params: Array[Float], tokenizer: Tokenizer, prompt: String, count: Int,
@@ -26,7 +27,7 @@ object Generate:
       val next = pick(logits.map(_.toDouble), temperature, topK, rng)
       ids = ids :+ next
       if n < count then
-        logits = if dec.position < context then dec.step(next) else prefill(ids.takeRight(math.max(1, context / 2)))
+        logits = if !dec.bounded || dec.position < context then dec.step(next) else prefill(ids.takeRight(math.max(1, context / 2)))
       n += 1
     tokenizer.decode(ids)
 

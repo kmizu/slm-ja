@@ -16,13 +16,14 @@ object Checkpoint:
   def save(dir: Path, cfg: Config, params: Array[Float], tokenizer: Tokenizer): Unit =
     Files.createDirectories(dir)
     Files.writeString(dir.resolve("config.txt"),
-      s"vocab=${cfg.vocab}\nd=${cfg.d}\nheads=${cfg.heads}\nlayers=${cfg.layers}\ncontext=${cfg.context}\nff=${cfg.ff}\nattention=${cfg.attention}\n")
+      s"vocab=${cfg.vocab}\nd=${cfg.d}\nheads=${cfg.heads}\nlayers=${cfg.layers}\ncontext=${cfg.context}\nff=${cfg.ff}\nattention=${cfg.attention}\npositions=${cfg.positions}\n")
     tokenizer.save(dir.resolve("vocab.txt"))
     writeFloats(dir.resolve("params.bin"), params)
 
   def load(dir: Path): (Config, Array[Float], Tokenizer) =
     val kv = readKv(dir.resolve("config.txt"))
-    val cfg = Config(kv("vocab").toInt, kv("d").toInt, kv("heads").toInt, kv("layers").toInt, kv("context").toInt, kv("ff").toInt, kv.getOrElse("attention", "softmax"))
+    val cfg = Config(kv("vocab").toInt, kv("d").toInt, kv("heads").toInt, kv("layers").toInt, kv("context").toInt, kv("ff").toInt, kv.getOrElse("attention", "softmax"),
+      kv.getOrElse("positions", "learned"))
     val size = new Layout(cfg).size
     val file = dir.resolve("params.bin")
     val bytes = Files.size(file)

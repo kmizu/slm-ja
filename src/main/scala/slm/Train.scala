@@ -114,7 +114,7 @@ object Train:
 
   val knownKeys: Set[String] = Set("mode", "corpus", "vocabFile", "minCount", "d", "heads", "layers", "context", "ff", "batch", "threads",
     "steps", "stopAfterSteps", "lr", "floorLr", "warmup", "wd", "clip", "seed", "evalEvery", "saveEvery", "saveSeconds", "sampleEvery",
-    "prompt", "out", "resume", "initFrom", "stopFile", "keepGenerations", "split", "attention", "extendTo", "restartWarmup", "restartLr")
+    "prompt", "out", "resume", "initFrom", "stopFile", "keepGenerations", "split", "attention", "extendTo", "restartWarmup", "restartLr", "positions")
 
   def parseArgs(args: Array[String]): Map[String, String] =
     val kv = args.map { a =>
@@ -170,7 +170,8 @@ object Train:
     val unkRate = tokens.count(_ == tokenizer.unk).toDouble / tokens.length
 
     val run0 = resumed.map(_._1.run).getOrElse {
-      val cfg = Config(tokenizer.vocabSize, int("d", 128), int("heads", 4), int("layers", 3), int("context", 128), int("ff", 512), str("attention", "softmax"))
+      val cfg = Config(tokenizer.vocabSize, int("d", 128), int("heads", 4), int("layers", 3), int("context", 128), int("ff", 512), str("attention", "softmax"),
+        str("positions", "learned"))
       val peak = dbl("lr", 1e-3)
       RunConfig(cfg, int("batch", 32), int("steps", 4096), int("warmup", 256), peak, dbl("floorLr", peak * 0.1), dbl("wd", 0.1), dbl("clip", 1.0), int("seed", 0).toLong)
     }
@@ -187,6 +188,7 @@ object Train:
     for (k, v) <- Seq("d" -> run.cfg.d, "heads" -> run.cfg.heads, "layers" -> run.cfg.layers, "context" -> run.cfg.context, "ff" -> run.cfg.ff, "batch" -> run.batch, "steps" -> run.steps) do
       opt.get(k).foreach(given_ => require(given_.toInt == v, s"resume と CLI の $k が違う: 保存 $v, 指定 $given_"))
     opt.get("attention").foreach(a => require(a == run.cfg.attention, s"resume と CLI の attention が違う: 保存 ${run.cfg.attention}, 指定 $a"))
+    opt.get("positions").foreach(a => require(a == run.cfg.positions, s"resume と CLI の positions が違う: 保存 ${run.cfg.positions}, 指定 $a"))
     resumed.foreach { (st, _, _) =>
       require(st.meta("corpusHash") == corpusHash, "コーパスが保存時と違う")
       require(st.meta("vocabHash") == tokenizer.hash, "語彙が保存時と違う")

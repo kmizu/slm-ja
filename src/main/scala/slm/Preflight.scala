@@ -21,7 +21,8 @@ object Preflight:
   /** P = V*d + T*d + L*(4*d*d + 2*d*F + 9*d + F) + 2*d + V */
   def parameterCount(c: Config): Long =
     val V = c.vocab.toLong; val d = c.d.toLong; val T = c.context.toLong; val L = c.layers.toLong; val F = c.ff.toLong
-    V * d + T * d + L * (4 * d * d + 2 * d * F + 9 * d + F) + 2 * d + V
+    val positions = if c.hasPositions then T * d else 0L
+    V * d + positions + L * (4 * d * d + 2 * d * F + 9 * d + F) + 2 * d + V
 
   /** S = L*(8*T*d + T*F + H*T*T + 4*T) + 12*T*d + 2*T*F + T*V + 3*T + 8 */
   def workspaceFloats(c: Config): Long =

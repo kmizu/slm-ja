@@ -3,8 +3,10 @@ package slm.reference
 import scala.util.Random
 
 /** モデルの大きさ。 */
-final case class Config(vocab: Int, d: Int, heads: Int, layers: Int, context: Int, ff: Int, attention: String = "softmax"):
+final case class Config(vocab: Int, d: Int, heads: Int, layers: Int, context: Int, ff: Int, attention: String = "softmax",
+                        positions: String = "learned"):
   require(d % heads == 0, "d はヘッド数で割り切れること")
+  def hasPositions: Boolean = positions == "learned"
   val headDim: Int = d / heads
   def isLinear: Boolean = attention == "linear"
   def gamma(h: Int): Double = 1.0 - math.pow(2.0, -(5.0 + h))
@@ -18,7 +20,7 @@ final class Layout(val cfg: Config):
   private def take(n: Int): Int = { val at = cursor; cursor += n; at }
 
   val tok: Int = take(cfg.vocab * cfg.d)          // トークン埋め込み（出力ヘッドと共有）
-  val pos: Int = take(cfg.context * cfg.d)        // 位置埋め込み
+  val pos: Int = take(if cfg.hasPositions then cfg.context * cfg.d else 0) // 位置埋め込み
   final case class Layer(ln1g: Int, ln1b: Int, wq: Int, bq: Int, wk: Int, bk: Int, wv: Int, bv: Int, wo: Int, bo: Int,
                          ln2g: Int, ln2b: Int, w1: Int, b1: Int, w2: Int, b2: Int)
   val layer: Vector[Layer] = Vector.fill(cfg.layers) {
@@ -41,7 +43,7 @@ final class Layout(val cfg: Config):
         i += 1
     def ones(at: Int, n: Int): Unit = java.util.Arrays.fill(p, at, at + n, 1.0)
     fill(tok, cfg.vocab * cfg.d, 0.02)
-    fill(pos, cfg.context * cfg.d, 0.02)
+    if cfg.hasPositions then fill(pos, cfg.context * cfg.d, 0.02)
     val residualScale = 0.02 / math.sqrt(2.0 * cfg.layers)
     for l <- layer do
       ones(l.ln1g, cfg.d); ones(l.ln2g, cfg.d)
@@ -190,7 +192,7 @@ final class Model(val cfg: Config):
       val posAt = L.pos + t * d
       var i = 0
       while i < d do
-        x0(t * d + i) = p(tokAt + i) + p(posAt + i)
+        x0(t * d + i) = p(tokAt + i) + (if cfg.hasPositions then p(posAt + i) else 0.0)
         i += 1
       t += 1
     val tmp = ws.tmp
@@ -425,7 +427,7 @@ final class Model(val cfg: Config):
       var i = 0
       while i < d do
         g(tokAt + i) += dx(t * d + i)
-        g(posAt + i) += dx(t * d + i)
+        if cfg.hasPositions then g(posAt + i) += dx(t * d + i)
         i += 1
       t += 1
 
